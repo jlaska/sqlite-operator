@@ -1,0 +1,33 @@
+apiVersion: database.example.com/v1
+kind: SQLiteDB
+metadata:
+  name: example-sqlite
+  namespace: default
+spec:
+  databaseName: "myapp"
+  storageSize: "1Gi"
+  replicas: 1
+  initSQL: |
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      email TEXT NOT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    CREATE TABLE posts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users (id)
+    );
+    
+    INSERT INTO users (username, email) VALUES 
+      ('admin', 'admin@example.com'),
+      ('demo', 'demo@example.com');
+      
+    INSERT INTO posts (user_id, title, content) VALUES 
+      (1, 'Welcome', 'Welcome to our SQLite database!'),
+      (2, 'Getting Started', 'This is a sample post.');

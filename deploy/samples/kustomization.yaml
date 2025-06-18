@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: sqlite-operator-samples
+
+commonLabels:
+  app.kubernetes.io/name: sqlite-operator
+  app.kubernetes.io/component: sample
+  app.kubernetes.io/part-of: sqlite-operator
+
+resources:
+- sample-sqlitedb.yaml

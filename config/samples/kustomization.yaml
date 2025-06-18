@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- database_v1_sqlitedb.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
