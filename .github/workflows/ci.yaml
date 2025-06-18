@@ -41,7 +41,7 @@ jobs:
       run: make test
 
     - name: Run lint
-      uses: golangci/golangci-lint-action@v6
+      uses: golangci/golangci-lint-action@v8
       with:
         version: v1.61.0
         args: --timeout=5m
