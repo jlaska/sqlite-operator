@@ -1,15 +1,17 @@
-version: "2"
-
 run:
   timeout: 5m
+  issues-exit-code: 1
 
 linters:
+  disable-all: true
   enable:
     - copyloopvar
     - dupl
     - errcheck
     - goconst
     - gocyclo
+    - gofmt
+    - goimports
     - govet
     - ineffassign
     - misspell
@@ -21,28 +23,24 @@ linters:
     - unparam
     - unused
 
-  settings:
-    dupl:
-      threshold: 100
-    gocyclo:
-      min-complexity: 15
-    goconst:
-      min-len: 2
-      min-occurrences: 3
-    govet:
-      enable:
-        - shadow
-    misspell:
-      locale: US
+linters-settings:
+  dupl:
+    threshold: 100
+  gocyclo:
+    min-complexity: 15
+  goconst:
+    min-len: 2
+    min-occurrences: 3
+  goimports:
+    local-prefixes: github.com/jlaska/sqlite-operator
+  govet:
+    check-shadowing: true
+  misspell:
+    locale: US
 
-  exclusions:
-    rules:
-      - linters:
-          - dupl
-          - misspell
-        path: _test\.go
-
-formatters:
-  enable:
-    - gofmt
-    - goimports
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - dupl
+        - misspell
