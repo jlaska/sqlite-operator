@@ -1,18 +1,17 @@
 version: "2"
+
 run:
-  allow-parallel-runners: true
+  timeout: 5m
+
 linters:
-  default: none
   enable:
     - copyloopvar
     - dupl
     - errcheck
-    - ginkgolinter
     - goconst
     - gocyclo
     - govet
     - ineffassign
-    - lll
     - misspell
     - nakedret
     - prealloc
@@ -21,32 +20,29 @@ linters:
     - unconvert
     - unparam
     - unused
+
   settings:
-    revive:
-      rules:
-        - name: comment-spacings
-        - name: import-shadowing
+    dupl:
+      threshold: 100
+    gocyclo:
+      min-complexity: 15
+    goconst:
+      min-len: 2
+      min-occurrences: 3
+    govet:
+      enable:
+        - shadow
+    misspell:
+      locale: US
+
   exclusions:
-    generated: lax
     rules:
       - linters:
-          - lll
-        path: api/*
-      - linters:
           - dupl
-          - lll
-        path: internal/*
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+          - misspell
+        path: _test\.go
+
 formatters:
   enable:
     - gofmt
     - goimports
-  exclusions:
-    generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
