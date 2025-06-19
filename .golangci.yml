@@ -16,3 +16,16 @@ linters:
     - unconvert
     - dupl
     - revive
+
+  settings:
+    revive:
+      rules:
+        - name: dot-imports
+          disabled: true
+
+  exclusions:
+    rules:
+      - linters:
+          - revive
+        text: "dot-imports"
+        path: test/
