@@ -6,11 +6,13 @@ metadata:
   
 namespace: sqlite-operator-system
 
-commonLabels:
-  app.kubernetes.io/name: sqlite-operator
-  app.kubernetes.io/component: manager
-  app.kubernetes.io/part-of: sqlite-operator
-  app.kubernetes.io/managed-by: kustomize
+labels:
+- includeSelectors: true
+  pairs:
+    app.kubernetes.io/name: sqlite-operator
+    app.kubernetes.io/component: manager
+    app.kubernetes.io/part-of: sqlite-operator
+    app.kubernetes.io/managed-by: kustomize
 
 resources:
 - namespace.yaml
@@ -30,29 +32,3 @@ configMapGenerator:
 - name: manager-config
   files:
   - controller_manager_config.yaml
-
-secretGenerator:
-- name: webhook-server-certs
-  files:
-  - tls.crt=/dev/null
-  - tls.key=/dev/null
-
-replacements:
-- source:
-    kind: Service
-    name: webhook-service
-    fieldPath: .metadata.name
-  targets:
-  - select:
-      kind: MutatingWebhookConfiguration
-    fieldPaths:
-    - .webhooks.[name=mutating-webhook].clientConfig.service.name
-- source:
-    kind: Service  
-    name: webhook-service
-    fieldPath: .metadata.namespace
-  targets:
-  - select:
-      kind: MutatingWebhookConfiguration
-    fieldPaths:
-    - .webhooks.[name=mutating-webhook].clientConfig.service.namespace
