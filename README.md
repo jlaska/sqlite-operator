@@ -259,9 +259,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+## Documentation
+
+- 📖 [Usage Guide](./docs/USAGE.md) - Complete guide for using SQLite databases
+- 🚀 [Deployment Guide](./docs/DEPLOYMENT.md) - Installation and deployment instructions  
+- 🔧 [Build Guide](./docs/BUILD.md) - Development and build instructions
+
 ## Support
 
-- 📖 [Documentation](./deploy/README.md)
 - 🐛 [Issues](https://github.com/jlaska/sqlite-operator/issues)
 - 💬 [Discussions](https://github.com/jlaska/sqlite-operator/discussions)
-- 🔧 [Build Pipeline](./BUILD.md)

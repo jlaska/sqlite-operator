@@ -23,12 +23,24 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// StorageSpec defines the storage configuration for SQLiteDB
+type StorageSpec struct {
+	// Size is the requested storage size for the database
+	Size string `json:"size,omitempty"`
+
+	// StorageClass is the name of the storage class to use for the database
+	StorageClass string `json:"storageClass,omitempty"`
+}
+
 // SQLiteDBSpec defines the desired state of SQLiteDB.
 type SQLiteDBSpec struct {
 	// DatabaseName is the name of the SQLite database file
 	DatabaseName string `json:"databaseName"`
 
-	// StorageSize is the requested storage size for the database
+	// Storage defines the storage configuration for the database
+	Storage StorageSpec `json:"storage,omitempty"`
+
+	// StorageSize is the requested storage size for the database (deprecated, use Storage.Size)
 	StorageSize string `json:"storageSize,omitempty"`
 
 	// InitSQL contains SQL statements to execute when creating the database

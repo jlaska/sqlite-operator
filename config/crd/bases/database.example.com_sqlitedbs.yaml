@@ -57,8 +57,20 @@ spec:
                   read scaling)
                 format: int32
                 type: integer
+              storage:
+                description: Storage defines the storage configuration for the database
+                properties:
+                  size:
+                    description: Size is the requested storage size for the database
+                    type: string
+                  storageClass:
+                    description: StorageClass is the name of the storage class to
+                      use for the database
+                    type: string
+                type: object
               storageSize:
                 description: StorageSize is the requested storage size for the database
+                  (deprecated, use Storage.Size)
                 type: string
             required:
             - databaseName
