@@ -115,12 +115,15 @@ func (r *SQLiteDBReconciler) reconcilePVC(ctx context.Context, sqliteDB *databas
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+		// Get storage size - prefer new Storage.Size over deprecated StorageSize
 		storageSize := "1Gi"
-		if sqliteDB.Spec.StorageSize != "" {
+		if sqliteDB.Spec.Storage.Size != "" {
+			storageSize = sqliteDB.Spec.Storage.Size
+		} else if sqliteDB.Spec.StorageSize != "" {
 			storageSize = sqliteDB.Spec.StorageSize
 		}
 
-		pvc.Spec = corev1.PersistentVolumeClaimSpec{
+		pvcSpec := corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
@@ -128,6 +131,13 @@ func (r *SQLiteDBReconciler) reconcilePVC(ctx context.Context, sqliteDB *databas
 				},
 			},
 		}
+
+		// Set storage class if specified
+		if sqliteDB.Spec.Storage.StorageClass != "" {
+			pvcSpec.StorageClassName = &sqliteDB.Spec.Storage.StorageClass
+		}
+
+		pvc.Spec = pvcSpec
 		return controllerutil.SetControllerReference(sqliteDB, pvc, r.Scheme)
 	})
 

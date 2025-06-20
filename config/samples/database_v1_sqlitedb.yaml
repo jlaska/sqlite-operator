@@ -7,7 +7,9 @@ metadata:
   name: sample-sqlitedb
 spec:
   databaseName: "sampledb"
-  storageSize: "2Gi"
+  storage:
+    size: "2Gi"
+    storageClass: "longhorn-unreplicated-besteffort"
   replicas: 1
   initSQL: |
     CREATE TABLE users (
