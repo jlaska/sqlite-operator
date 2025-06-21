@@ -35,7 +35,7 @@ spec:
   databaseName: "app_db"
   storage:
     size: "2Gi"
-    storageClass: "longhorn-unreplicated-besteffort"
+    storageClass: "longhorn"
   initSQL: |
     CREATE TABLE users (
       id INTEGER PRIMARY KEY,
@@ -51,11 +51,6 @@ EOF
 - **📦 [Installation Guide](./docs/INSTALL.md)** - Deploy the operator to your cluster
 - **📖 [Usage Guide](./docs/USAGE.md)** - Create databases and connect applications  
 - **🔧 [Build Guide](./docs/BUILD.md)** - Development and contribution instructions
-
-## Support
-
-- 🐛 [Report Issues](https://github.com/jlaska/sqlite-operator/issues)
-- 💬 [Discussions](https://github.com/jlaska/sqlite-operator/discussions)
 
 ## License
 

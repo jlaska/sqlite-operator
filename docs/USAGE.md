@@ -44,7 +44,7 @@ spec:
   databaseName: "prod"
   storage:
     size: "10Gi"
-    storageClass: "longhorn-unreplicated-besteffort"
+    storageClass: "longhorn"
   initSQL: |
     CREATE TABLE users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,7 +207,7 @@ spec:
 spec:
   storage:
     size: "50Gi"
-    storageClass: "longhorn-unreplicated-besteffort"
+    storageClass: "longhorn"
 
 # Default storage (omit storageClass)
 spec:

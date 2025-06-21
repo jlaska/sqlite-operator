@@ -9,7 +9,7 @@ spec:
   databaseName: "sampledb"
   storage:
     size: "2Gi"
-    storageClass: "longhorn-unreplicated-besteffort"
+    storageClass: "longhorn"
   replicas: 1
   initSQL: |
     CREATE TABLE users (
