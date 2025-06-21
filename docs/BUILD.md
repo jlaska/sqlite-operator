@@ -21,7 +21,7 @@ This guide covers setting up the build pipeline and CI/CD for the SQLite Operato
 ### 2. Generate Robot Account (Recommended)
 
 1. Go to your repository settings
-2. Click "Robot Accounts" 
+2. Click "Robot Accounts"
 3. Create a new robot account with "Write" permissions
 4. Note the username (e.g., `jlaska+sqlite_operator_bot`) and token
 
@@ -44,7 +44,7 @@ QUAY_PASSWORD=<robot-account-token>       # Your robot account token
 
 Or if using personal credentials:
 ```
-QUAY_USERNAME=jlaska              # Your Quay.io username  
+QUAY_USERNAME=jlaska              # Your Quay.io username
 QUAY_PASSWORD=<your-password>     # Your Quay.io password
 ```
 
@@ -80,7 +80,7 @@ make version
 
 # Bump versions
 make version-bump-patch  # v0.1.0 → v0.1.1
-make version-bump-minor  # v0.1.0 → v0.2.0  
+make version-bump-minor  # v0.1.0 → v0.2.0
 make version-bump-major  # v0.1.0 → v1.0.0
 
 # Build with new version
@@ -108,7 +108,7 @@ The pipeline runs on:
 
 1. **Test**: Runs Go tests and linting
 2. **Build**: Builds multi-arch container image and pushes to Quay
-3. **Security Scan**: Scans image with Trivy for vulnerabilities  
+3. **Security Scan**: Scans image with Trivy for vulnerabilities
 4. **Generate Manifests**: Creates deployment YAML files
 5. **Release** (tags only): Creates GitHub release with manifests
 
@@ -181,7 +181,7 @@ spec:
 ### GitHub Actions
 - View workflow runs at: `https://github.com/jlaska/sqlite-operator/actions`
 
-### Quay.io 
+### Quay.io
 - View builds at: `https://quay.io/repository/jlaska/sqlite-operator`
 - Check tags and security scans
 
@@ -196,7 +196,7 @@ spec:
 # Check workflow logs in GitHub Actions
 # Common issues:
 # 1. Invalid Quay credentials
-# 2. Repository permissions  
+# 2. Repository permissions
 # 3. Docker build errors
 
 # Test locally:
@@ -234,6 +234,6 @@ kubectl get deployment -n sqlite-operator-system -o yaml | grep image
 ## Next Steps
 
 1. **Push to GitHub**: Commit and push your changes
-2. **Verify Pipeline**: Check that GitHub Actions runs successfully  
+2. **Verify Pipeline**: Check that GitHub Actions runs successfully
 3. **Test Deployment**: Deploy to a test cluster
 4. **Production Deployment**: Use ArgoCD or your preferred GitOps tool

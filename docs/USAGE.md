@@ -52,7 +52,7 @@ spec:
       email TEXT UNIQUE NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
-    
+
     CREATE INDEX idx_users_email ON users(email);
 ```
 
@@ -122,7 +122,7 @@ spec:
       initContainers:
       - name: wait-for-db
         image: keinos/sqlite3:latest
-        command: 
+        command:
         - sh
         - -c
         - |
@@ -203,7 +203,7 @@ spec:
     size: "5Gi"
     storageClass: "ssd-high-iops"
 
-# Cost-effective storage  
+# Cost-effective storage
 spec:
   storage:
     size: "50Gi"
@@ -238,7 +238,7 @@ spec:
       content TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
-    
+
     CREATE INDEX idx_posts_created ON posts(created_at);
 ```
 
@@ -254,7 +254,7 @@ spec:
       name TEXT UNIQUE NOT NULL,
       description TEXT
     );
-    
+
     CREATE TABLE products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -263,14 +263,14 @@ spec:
       stock INTEGER DEFAULT 0,
       FOREIGN KEY (category_id) REFERENCES categories (id)
     );
-    
+
     -- Insert initial data
-    INSERT INTO categories (name, description) VALUES 
+    INSERT INTO categories (name, description) VALUES
       ('Electronics', 'Electronic devices and accessories'),
       ('Books', 'Physical and digital books'),
       ('Clothing', 'Apparel and accessories');
-    
-    INSERT INTO products (name, price, category_id, stock) VALUES 
+
+    INSERT INTO products (name, price, category_id, stock) VALUES
       ('Laptop', 999.99, 1, 10),
       ('Python Programming', 49.99, 2, 50),
       ('T-Shirt', 19.99, 3, 100);
@@ -302,7 +302,7 @@ spec:
       password_hash TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
-    
+
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
       user_id INTEGER,
