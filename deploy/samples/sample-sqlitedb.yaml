@@ -5,7 +5,8 @@ metadata:
   namespace: default
 spec:
   databaseName: "myapp"
-  storageSize: "1Gi"
+  storage:
+    size: "1Gi"
   replicas: 1
   initSQL: |
     CREATE TABLE users (

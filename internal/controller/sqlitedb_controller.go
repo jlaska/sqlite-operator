@@ -115,12 +115,10 @@ func (r *SQLiteDBReconciler) reconcilePVC(ctx context.Context, sqliteDB *databas
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		// Get storage size - prefer new Storage.Size over deprecated StorageSize
+		// Get storage size from Storage.Size field
 		storageSize := "1Gi"
 		if sqliteDB.Spec.Storage.Size != "" {
 			storageSize = sqliteDB.Spec.Storage.Size
-		} else if sqliteDB.Spec.StorageSize != "" {
-			storageSize = sqliteDB.Spec.StorageSize
 		}
 
 		pvcSpec := corev1.PersistentVolumeClaimSpec{

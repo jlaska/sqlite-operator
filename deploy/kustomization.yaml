@@ -9,14 +9,14 @@ namespace: sqlite-operator-system
 labels:
 - includeSelectors: true
   pairs:
-    app.kubernetes.io/name: sqlite-operator
     app.kubernetes.io/component: manager
-    app.kubernetes.io/part-of: sqlite-operator
     app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: sqlite-operator
+    app.kubernetes.io/part-of: sqlite-operator
 
 resources:
 - namespace.yaml
-- serviceaccount.yaml  
+- serviceaccount.yaml
 - clusterrole.yaml
 - clusterrolebinding.yaml
 - deployment.yaml
@@ -29,6 +29,6 @@ images:
   newTag: latest
 
 configMapGenerator:
-- name: manager-config
-  files:
+- files:
   - controller_manager_config.yaml
+  name: manager-config

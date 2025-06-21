@@ -68,10 +68,6 @@ spec:
                       use for the database
                     type: string
                 type: object
-              storageSize:
-                description: StorageSize is the requested storage size for the database
-                  (deprecated, use Storage.Size)
-                type: string
             required:
             - databaseName
             type: object

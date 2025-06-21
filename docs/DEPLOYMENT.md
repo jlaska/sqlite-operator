@@ -88,7 +88,8 @@ metadata:
   namespace: my-namespace
 spec:
   databaseName: "app_db"
-  storageSize: "5Gi"
+  storage:
+    size: "5Gi"
   replicas: 1
   initSQL: |
     CREATE TABLE products (
@@ -106,7 +107,8 @@ spec:
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
 | `databaseName` | string | Name of the SQLite database file | Yes |
-| `storageSize` | string | Size of persistent storage (default: 1Gi) | No |
+| `storage.size` | string | Size of persistent storage (default: 1Gi) | No |
+| `storage.storageClass` | string | Storage class name for the database | No |
 | `replicas` | int32 | Number of replicas (default: 1) | No |
 | `initSQL` | string | SQL statements to run during initialization | No |
 | `backupEnabled` | bool | Enable automatic backups | No |

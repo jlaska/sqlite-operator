@@ -40,9 +40,6 @@ type SQLiteDBSpec struct {
 	// Storage defines the storage configuration for the database
 	Storage StorageSpec `json:"storage,omitempty"`
 
-	// StorageSize is the requested storage size for the database (deprecated, use Storage.Size)
-	StorageSize string `json:"storageSize,omitempty"`
-
 	// InitSQL contains SQL statements to execute when creating the database
 	InitSQL string `json:"initSQL,omitempty"`
 

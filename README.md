@@ -42,7 +42,8 @@ metadata:
   name: my-database
 spec:
   databaseName: "app_db"
-  storageSize: "1Gi"
+  storage:
+    size: "1Gi"
   initSQL: |
     CREATE TABLE users (
       id INTEGER PRIMARY KEY,
@@ -98,7 +99,8 @@ kubectl get sqlitedb
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
 | `databaseName` | string | Name of the SQLite database file | Yes |
-| `storageSize` | string | Size of persistent storage (default: 1Gi) | No |
+| `storage.size` | string | Size of persistent storage (default: 1Gi) | No |
+| `storage.storageClass` | string | Storage class name for the database | No |
 | `replicas` | int32 | Number of replicas (default: 1) | No |
 | `initSQL` | string | SQL statements to run during initialization | No |
 | `backupEnabled` | bool | Enable automatic backups | No |
@@ -114,7 +116,8 @@ metadata:
   name: simple-db
 spec:
   databaseName: "simple"
-  storageSize: "500Mi"
+  storage:
+    size: "500Mi"
 ```
 
 #### Database with Initialization
@@ -125,7 +128,8 @@ metadata:
   name: app-database
 spec:
   databaseName: "myapp"
-  storageSize: "2Gi"
+  storage:
+    size: "2Gi"
   initSQL: |
     CREATE TABLE products (
       id INTEGER PRIMARY KEY,
@@ -146,7 +150,8 @@ metadata:
   name: production-db
 spec:
   databaseName: "prod"
-  storageSize: "10Gi"
+  storage:
+    size: "10Gi"
   replicas: 3
   backupEnabled: true
   backupSchedule: "0 2 * * *"  # Daily at 2 AM
