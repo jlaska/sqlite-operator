@@ -36,6 +36,8 @@ import (
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 )
 
+const labelApp = "app"
+
 // SQLiteDBReconciler reconciles a SQLiteDB object
 type SQLiteDBReconciler struct {
 	client.Client
@@ -182,13 +184,13 @@ func (r *SQLiteDBReconciler) reconcileDeployment(ctx context.Context, sqliteDB *
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					"app": sqliteDB.Name,
+					labelApp: sqliteDB.Name,
 				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app": sqliteDB.Name,
+						labelApp: sqliteDB.Name,
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -266,7 +268,7 @@ func (r *SQLiteDBReconciler) reconcileService(ctx context.Context, sqliteDB *dat
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, service, func() error {
 		service.Spec = corev1.ServiceSpec{
 			Selector: map[string]string{
-				"app": sqliteDB.Name,
+				labelApp: sqliteDB.Name,
 			},
 			Ports: []corev1.ServicePort{
 				{
