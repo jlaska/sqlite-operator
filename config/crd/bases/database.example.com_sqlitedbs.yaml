@@ -14,7 +14,26 @@ spec:
     singular: sqlitedb
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.targetDeployment
+      name: Target
+      type: string
+    - jsonPath: .spec.databaseName
+      name: Database
+      type: string
+    - jsonPath: .spec.backup.enabled
+      name: Backup
+      type: boolean
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
     schema:
       openAPIV3Schema:
         description: SQLiteDB is the Schema for the sqlitedbs API.
@@ -39,43 +58,96 @@ spec:
           spec:
             description: SQLiteDBSpec defines the desired state of SQLiteDB.
             properties:
-              backupEnabled:
-                description: BackupEnabled enables automatic backups
-                type: boolean
-              backupSchedule:
-                description: BackupSchedule defines the backup schedule in cron format
-                type: string
-              databaseName:
-                description: DatabaseName is the name of the SQLite database file
-                type: string
-              initSQL:
-                description: InitSQL contains SQL statements to execute when creating
-                  the database
-                type: string
-              replicas:
-                description: Replicas defines the number of database replicas (for
-                  read scaling)
-                format: int32
-                type: integer
-              storage:
-                description: Storage defines the storage configuration for the database
+              backup:
+                description: Backup defines the Litestream replication / backup configuration.
                 properties:
-                  size:
-                    description: Size is the requested storage size for the database
+                  destination:
+                    description: Destination specifies where backups are stored.
+                    properties:
+                      s3:
+                        description: S3 configures an S3-compatible backup destination.
+                        properties:
+                          bucket:
+                            description: Bucket is the name of the S3 bucket.
+                            type: string
+                          endpoint:
+                            description: |-
+                              Endpoint is the S3-compatible endpoint URL (e.g. "minio.homelab:9000").
+                              Leave empty for AWS S3.
+                            type: string
+                          path:
+                            description: Path is the key prefix within the bucket
+                              (e.g. "paperless/").
+                            type: string
+                          secretRef:
+                            description: |-
+                              SecretRef names a Secret in the same namespace containing S3 credentials.
+                              The Secret must have keys: access-key-id, secret-access-key.
+                            type: string
+                        required:
+                        - bucket
+                        - secretRef
+                        type: object
+                    type: object
+                  enabled:
+                    default: false
+                    description: Enabled controls whether Litestream replication is
+                      active.
+                    type: boolean
+                  retention:
+                    description: Retention controls how many snapshots are kept.
+                    properties:
+                      count:
+                        default: 10
+                        description: Count is the number of snapshots to retain. Older
+                          snapshots are pruned.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  schedule:
+                    description: |-
+                      Schedule is the cron expression for periodic snapshot uploads
+                      (e.g. "0 */6 * * *" for every 6 hours). Litestream streams WAL
+                      continuously regardless; this controls full snapshot frequency.
                     type: string
-                  storageClass:
-                    description: StorageClass is the name of the storage class to
-                      use for the database
-                    type: string
+                required:
+                - enabled
                 type: object
+              databaseName:
+                description: DatabaseName is the filename of the SQLite database (e.g.
+                  "paperless.db").
+                type: string
+              databasePath:
+                description: |-
+                  DatabasePath is the directory path inside the application container where
+                  the database file lives (e.g. "/data"). The Litestream sidecar will be
+                  configured to watch DatabasePath/DatabaseName.
+                type: string
+              image:
+                default: litestream/litestream:0.3.13
+                description: Image overrides the Litestream container image used for
+                  the sidecar.
+                type: string
+              targetDeployment:
+                description: |-
+                  TargetDeployment is the name of the existing Deployment in this namespace
+                  that the Litestream sidecar should be injected into.
+                type: string
             required:
             - databaseName
+            - databasePath
+            - targetDeployment
             type: object
           status:
             description: SQLiteDBStatus defines the observed state of SQLiteDB.
             properties:
+              backupHealthy:
+                description: BackupHealthy indicates the last backup/replication check
+                  succeeded.
+                type: boolean
               conditions:
-                description: Conditions represent the latest available observations
+                description: Conditions holds standard Kubernetes condition entries.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -131,22 +203,31 @@ spec:
                   - type
                   type: object
                 type: array
-              databaseSize:
-                description: DatabaseSize shows the current database file size
-                type: string
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               lastBackup:
-                description: LastBackup indicates when the last backup was performed
+                description: LastBackup is the timestamp of the most recent successful
+                  backup.
                 format: date-time
                 type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  was computed from.
+                format: int64
+                type: integer
               phase:
-                description: Phase represents the current phase of the SQLite database
-                type: string
-              podName:
-                description: PodName is the name of the pod running the SQLite database
+                description: 'Phase is the high-level lifecycle state: Configuring,
+                  Pending, Ready, Error.'
                 type: string
               ready:
-                description: Ready indicates if the database is ready to accept connections
+                description: Ready mirrors the Ready condition status for quick kubectl
+                  output.
                 type: boolean
+              replicationLag:
+                description: ReplicationLag is the approximate lag reported by Litestream
+                  (human-readable).
+                type: string
             type: object
         type: object
     served: true

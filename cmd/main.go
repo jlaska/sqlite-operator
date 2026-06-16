@@ -40,6 +40,7 @@ import (
 
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 	"github.com/jlaska/sqlite-operator/internal/controller"
+	sqlitewebhook "github.com/jlaska/sqlite-operator/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -208,6 +209,11 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SQLiteDB")
+		os.Exit(1)
+	}
+
+	if err := (&sqlitewebhook.SQLiteDBValidator{}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "SQLiteDB")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

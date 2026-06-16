@@ -8,8 +8,6 @@ rules:
   - ""
   resources:
   - configmaps
-  - persistentvolumeclaims
-  - services
   verbs:
   - create
   - delete
@@ -23,8 +21,6 @@ rules:
   resources:
   - deployments
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
