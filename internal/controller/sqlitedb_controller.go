@@ -36,13 +36,12 @@ import (
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 )
 
-// injectAnnotation is placed on a Deployment's pod template to signal the
-// mutating webhook to inject the Litestream sidecar.
-const injectAnnotation = "sqlite.database.example.com/inject"
-
-// configAnnotation records which SQLiteDB CR is managing a Deployment so the
-// webhook can look up the correct backup configuration.
-const configAnnotation = "sqlite.database.example.com/config"
+// Expose annotation keys as package-level aliases so tests can reference them
+// without importing the API package directly.
+const (
+	injectAnnotation = databasev1.AnnotationInject
+	configAnnotation = databasev1.AnnotationConfig
+)
 
 // SQLiteDBReconciler reconciles a SQLiteDB object
 type SQLiteDBReconciler struct {
@@ -137,8 +136,9 @@ func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB
 }
 
 // reconcileTargetAnnotation adds the injection and config annotations to the
-// target Deployment's pod template, triggering a rolling restart so the
-// mutating webhook injects the Litestream sidecar into new pods.
+// target Deployment's pod template. Annotating the pod template causes the
+// Deployment controller to perform a rolling restart, so new pods inherit the
+// annotations and the mutating webhook can inject the Litestream sidecar.
 func (r *SQLiteDBReconciler) reconcileTargetAnnotation(ctx context.Context, sqliteDB *databasev1.SQLiteDB) error {
 	deployment := &appsv1.Deployment{}
 	if err := r.Get(ctx, types.NamespacedName{
@@ -148,15 +148,24 @@ func (r *SQLiteDBReconciler) reconcileTargetAnnotation(ctx context.Context, sqli
 		return fmt.Errorf("target Deployment %q not found: %w", sqliteDB.Spec.TargetDeployment, err)
 	}
 
-	// Patch annotations on the Deployment itself (not the pod template) to
-	// avoid triggering an unintended pod restart on every reconcile.
+	configRef := fmt.Sprintf("%s/%s", sqliteDB.Namespace, sqliteDB.Name)
+
+	const injectEnabled = "true"
+
+	// Only patch when annotations are actually missing to avoid an infinite
+	// rolling-restart loop on every reconcile.
+	tmplAnnotations := deployment.Spec.Template.Annotations
+	if tmplAnnotations[injectAnnotation] == injectEnabled && tmplAnnotations[configAnnotation] == configRef {
+		return nil
+	}
+
 	patch := client.MergeFrom(deployment.DeepCopy())
 
-	if deployment.Annotations == nil {
-		deployment.Annotations = map[string]string{}
+	if deployment.Spec.Template.Annotations == nil {
+		deployment.Spec.Template.Annotations = map[string]string{}
 	}
-	deployment.Annotations[injectAnnotation] = "true"
-	deployment.Annotations[configAnnotation] = fmt.Sprintf("%s/%s", sqliteDB.Namespace, sqliteDB.Name)
+	deployment.Spec.Template.Annotations[injectAnnotation] = injectEnabled
+	deployment.Spec.Template.Annotations[configAnnotation] = configRef
 
 	return r.Patch(ctx, deployment, patch)
 }
@@ -193,7 +202,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 			LastTransitionTime: now,
 		})
 	} else {
-		annotated := deployment.Annotations[injectAnnotation] == "true"
+		annotated := deployment.Spec.Template.Annotations[injectAnnotation] == "true"
 		injectedCondStatus := metav1.ConditionFalse
 		injectedReason := "AnnotationPending"
 		injectedMsg := "injection annotation not yet observed on target Deployment"

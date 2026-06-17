@@ -144,7 +144,7 @@ var _ = Describe("SQLiteDB Controller", func() {
 
 		dep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
-		Expect(dep.Annotations).To(HaveKeyWithValue(injectAnnotation, "true"))
-		Expect(dep.Annotations).To(HaveKey(configAnnotation))
+		Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(injectAnnotation, "true"))
+		Expect(dep.Spec.Template.Annotations).To(HaveKey(configAnnotation))
 	})
 })

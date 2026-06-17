@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 	"github.com/jlaska/sqlite-operator/internal/controller"
@@ -216,6 +217,13 @@ func main() {
 		setupLog.Error(err, "unable to create webhook", "webhook", "SQLiteDB")
 		os.Exit(1)
 	}
+
+	mgr.GetWebhookServer().Register("/mutate-core-v1-pod", &webhook.Admission{
+		Handler: &sqlitewebhook.SidecarInjector{
+			Client:  mgr.GetClient(),
+			Decoder: admission.NewDecoder(mgr.GetScheme()),
+		},
+	})
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {

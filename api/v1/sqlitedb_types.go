@@ -97,6 +97,18 @@ type SQLiteDBSpec struct {
 	Backup BackupSpec `json:"backup,omitempty"`
 }
 
+// Annotation keys placed on a Deployment's pod template by the controller.
+// Pods inherit these annotations, signalling the mutating webhook to inject
+// the Litestream sidecar.
+const (
+	// AnnotationInject signals that the Litestream sidecar should be injected.
+	AnnotationInject = "sqlite.database.example.com/inject"
+
+	// AnnotationConfig records the "namespace/name" reference to the SQLiteDB CR
+	// that configures the sidecar for a given pod.
+	AnnotationConfig = "sqlite.database.example.com/config"
+)
+
 // Condition type constants.
 const (
 	// ConditionSidecarInjected indicates the Litestream sidecar has been
