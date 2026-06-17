@@ -155,8 +155,30 @@ ci-deploy-manifests: manifests kustomize ## Generate deployment manifests for CI
 	$(KUSTOMIZE) build deploy > release/sqlite-operator.yaml
 	$(KUSTOMIZE) build deploy/samples > release/samples.yaml
 
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart
+	helm lint charts/sqlite-operator
+
+.PHONY: helm-package
+helm-package: ## Package the Helm chart into release/
+	mkdir -p release
+	helm package charts/sqlite-operator \
+		--version $(VERSION:v%=%) \
+		--app-version $(VERSION:v%=%) \
+		--destination release/
+
+.PHONY: helm-push
+helm-push: ## Push the Helm chart OCI artifact to the registry (requires helm registry login)
+	helm push release/sqlite-operator-$(VERSION:v%=%).tgz oci://$(REGISTRY)/$(ORG)
+
+.PHONY: helm-template
+helm-template: ## Render the Helm chart with default values (dry-run)
+	helm template sqlite-operator charts/sqlite-operator \
+		--namespace sqlite-operator-system \
+		--set image.tag=$(VERSION)
+
 .PHONY: release-prepare
-release-prepare: version ci-deploy-manifests ## Prepare files for release
+release-prepare: version ci-deploy-manifests helm-package ## Prepare files for release
 	@echo "Prepared release $(VERSION) with image $(IMG)"
 	@echo "Release files:"
 	@ls -la release/
