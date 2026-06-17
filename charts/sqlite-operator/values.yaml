@@ -2,7 +2,7 @@
 
 ## Operator image
 image:
-  repository: quay.io/jlaska/sqlite-operator
+  repository: ghcr.io/jlaska/sqlite-operator
   tag: ""        # defaults to Chart.appVersion
   pullPolicy: IfNotPresent
 

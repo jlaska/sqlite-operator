@@ -25,7 +25,7 @@ resources:
 
 images:
 - name: controller
-  newName: quay.io/jlaska/sqlite-operator
+  newName: ghcr.io/jlaska/sqlite-operator
   newTag: latest
 
 configMapGenerator:
