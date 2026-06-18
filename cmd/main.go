@@ -206,8 +206,9 @@ func main() {
 	}
 
 	if err := (&controller.SQLiteDBReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("sqlitedb-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SQLiteDB")
 		os.Exit(1)

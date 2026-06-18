@@ -22,7 +22,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  # Leader election
+  # Pod inspection for backup health monitoring
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Events for backup health transitions
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
