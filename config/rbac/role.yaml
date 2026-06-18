@@ -42,9 +42,22 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - database.example.com
   resources:
   - sqlitedbs
+  - sqliterestores
   verbs:
   - create
   - delete
@@ -57,12 +70,14 @@ rules:
   - database.example.com
   resources:
   - sqlitedbs/finalizers
+  - sqliterestores/finalizers
   verbs:
   - update
 - apiGroups:
   - database.example.com
   resources:
   - sqlitedbs/status
+  - sqliterestores/status
   verbs:
   - get
   - patch

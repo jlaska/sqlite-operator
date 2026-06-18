@@ -1,0 +1,124 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: sqliterestores.database.example.com
+spec:
+  group: database.example.com
+  names:
+    kind: SQLiteRestore
+    listKind: SQLiteRestoreList
+    plural: sqliterestores
+    singular: sqliterestore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.sourceRef
+      name: Source
+      type: string
+    - jsonPath: .spec.targetPVC
+      name: TargetPVC
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SQLiteRestore triggers a one-shot restore of a SQLite database from a
+          Litestream backup stored in S3-compatible object storage.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SQLiteRestoreSpec defines the desired state of a SQLiteRestore
+              operation.
+            properties:
+              image:
+                description: |-
+                  Image overrides the Litestream container image used for the restore Job.
+                  Defaults to the image specified in the referenced SQLiteDB, or
+                  litestream/litestream:0.3.13 if neither is set.
+                type: string
+              sourceRef:
+                description: |-
+                  SourceRef is the name of the SQLiteDB CR whose backup configuration
+                  (S3 destination + credentials) should be used as the restore source.
+                  The SQLiteDB must be in the same namespace.
+                type: string
+              targetPVC:
+                description: |-
+                  TargetPVC is the name of the PersistentVolumeClaim that the restored
+                  database file will be written into. The PVC must already exist.
+                type: string
+              targetPath:
+                description: |-
+                  TargetPath is the full path (including filename) where the restored
+                  database file will be written inside the TargetPVC.
+                  Example: "/data/paperless.db"
+                type: string
+              timestamp:
+                description: |-
+                  Timestamp enables point-in-time recovery. When set, Litestream restores
+                  the database to the state it was in at this instant.
+                  Format: RFC 3339, e.g. "2026-06-17T10:00:00Z".
+                  When omitted the most recent snapshot is restored.
+                type: string
+            required:
+            - sourceRef
+            - targetPVC
+            - targetPath
+            type: object
+          status:
+            description: SQLiteRestoreStatus defines the observed state of a SQLiteRestore
+              operation.
+            properties:
+              completionTime:
+                description: CompletionTime is when the restore Job finished (successfully
+                  or not).
+                format: date-time
+                type: string
+              jobName:
+                description: JobName is the name of the Kubernetes Job created to
+                  perform the restore.
+                type: string
+              message:
+                description: |-
+                  Message contains a human-readable description of the current phase,
+                  including any error details on failure.
+                type: string
+              phase:
+                description: 'Phase is the current lifecycle state: Pending, Running,
+                  Complete, Failed.'
+                type: string
+              startTime:
+                description: StartTime is when the restore Job was created.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

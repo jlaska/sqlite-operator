@@ -22,6 +22,20 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  # Manage SQLiteRestore CRs
+  - apiGroups: ["database.example.com"]
+    resources: ["sqliterestores"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["database.example.com"]
+    resources: ["sqliterestores/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["database.example.com"]
+    resources: ["sqliterestores/finalizers"]
+    verbs: ["update"]
+  # Restore Jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   # Pod inspection for backup health monitoring
   - apiGroups: [""]
     resources: ["pods"]
