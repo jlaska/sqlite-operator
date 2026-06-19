@@ -223,7 +223,14 @@ func (r *SQLiteDBReconciler) reconcileTargetAnnotation(ctx context.Context, sqli
 	const injectEnabled = "true"
 
 	tmplAnnotations := deployment.Spec.Template.Annotations
-	if tmplAnnotations[injectAnnotation] == injectEnabled && tmplAnnotations[configAnnotation] == configRef {
+	tmplLabels := deployment.Spec.Template.Labels
+	// Both annotation and label must be present: the annotation carries the
+	// config ref (read by the webhook handler), and the label enables the
+	// MutatingWebhookConfiguration's objectSelector to route the pod to the
+	// webhook (Kubernetes objectSelector matches labels, not annotations).
+	if tmplAnnotations[injectAnnotation] == injectEnabled &&
+		tmplAnnotations[configAnnotation] == configRef &&
+		tmplLabels[injectAnnotation] == injectEnabled {
 		return nil
 	}
 
@@ -234,6 +241,12 @@ func (r *SQLiteDBReconciler) reconcileTargetAnnotation(ctx context.Context, sqli
 	}
 	deployment.Spec.Template.Annotations[injectAnnotation] = injectEnabled
 	deployment.Spec.Template.Annotations[configAnnotation] = configRef
+
+	// Mirror the inject signal as a label so the webhook objectSelector fires.
+	if deployment.Spec.Template.Labels == nil {
+		deployment.Spec.Template.Labels = map[string]string{}
+	}
+	deployment.Spec.Template.Labels[injectAnnotation] = injectEnabled
 
 	return r.Patch(ctx, deployment, patch)
 }

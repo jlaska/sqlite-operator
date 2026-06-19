@@ -129,6 +129,8 @@ var _ = Describe("SQLiteDB Controller", func() {
 		Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
 		Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(injectAnnotation, "true"))
 		Expect(dep.Spec.Template.Annotations).To(HaveKey(configAnnotation))
+		// Label mirrors annotation so the webhook objectSelector fires.
+		Expect(dep.Spec.Template.Labels).To(HaveKeyWithValue(injectAnnotation, "true"))
 	})
 
 	It("should set SidecarInjected condition after annotation", func() {
