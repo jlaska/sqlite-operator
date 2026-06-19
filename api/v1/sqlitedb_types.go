@@ -95,6 +95,18 @@ type SQLiteDBSpec struct {
 
 	// Backup defines the Litestream replication / backup configuration.
 	Backup BackupSpec `json:"backup,omitempty"`
+
+	// InitSQL contains one or more SQL statements to execute against the
+	// database on first use. The operator tracks a SHA-256 hash of this
+	// content; the statements are (re-)applied only when the hash changes,
+	// making updates idempotent across pod restarts.
+	// Use IF NOT EXISTS guards to make individual statements safe to re-run.
+	InitSQL string `json:"initSQL,omitempty"`
+
+	// InitImage is the container image used for the init container that
+	// applies InitSQL. Must include the sqlite3 CLI.
+	// +kubebuilder:default="keinos/sqlite3:latest"
+	InitImage string `json:"initImage,omitempty"`
 }
 
 // Annotation keys placed on a Deployment's pod template by the controller.
@@ -117,6 +129,10 @@ const (
 
 	// ConditionBackupHealthy indicates the most recent backup succeeded.
 	ConditionBackupHealthy = "BackupHealthy"
+
+	// ConditionInitSQLApplied indicates the InitSQL has been configured and
+	// the init container is ready to apply it on next pod start.
+	ConditionInitSQLApplied = "InitSQLApplied"
 
 	// ConditionReady is the top-level readiness condition.
 	ConditionReady = "Ready"
@@ -146,6 +162,11 @@ type SQLiteDBStatus struct {
 
 	// ReplicationLag is the approximate lag reported by Litestream (human-readable).
 	ReplicationLag string `json:"replicationLag,omitempty"`
+
+	// InitSQLHash is the SHA-256 hash of the InitSQL currently configured in
+	// the spec. The init container uses this to name its marker file, so a
+	// hash change triggers re-application on next pod rollout.
+	InitSQLHash string `json:"initSQLHash,omitempty"`
 
 	// ObservedGeneration is the .metadata.generation this status was computed from.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

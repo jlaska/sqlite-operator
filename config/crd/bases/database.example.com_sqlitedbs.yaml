@@ -129,6 +129,20 @@ spec:
                 description: Image overrides the Litestream container image used for
                   the sidecar.
                 type: string
+              initImage:
+                default: keinos/sqlite3:latest
+                description: |-
+                  InitImage is the container image used for the init container that
+                  applies InitSQL. Must include the sqlite3 CLI.
+                type: string
+              initSQL:
+                description: |-
+                  InitSQL contains one or more SQL statements to execute against the
+                  database on first use. The operator tracks a SHA-256 hash of this
+                  content; the statements are (re-)applied only when the hash changes,
+                  making updates idempotent across pod restarts.
+                  Use IF NOT EXISTS guards to make individual statements safe to re-run.
+                type: string
               targetDeployment:
                 description: |-
                   TargetDeployment is the name of the existing Deployment in this namespace
@@ -206,6 +220,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              initSQLHash:
+                description: |-
+                  InitSQLHash is the SHA-256 hash of the InitSQL currently configured in
+                  the spec. The init container uses this to name its marker file, so a
+                  hash change triggers re-application on next pod rollout.
+                type: string
               lastBackup:
                 description: LastBackup is the timestamp of the most recent successful
                   backup.

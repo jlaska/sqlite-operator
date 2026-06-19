@@ -37,6 +37,12 @@ const litestreamContainerName = "litestream"
 // litestreamConfigVolume is the name of the volume that mounts litestream.yml.
 const litestreamConfigVolume = "litestream-config"
 
+// sqliteInitContainerName is the name given to the injected init container.
+const sqliteInitContainerName = "sqlite-init"
+
+// sqliteInitSQLVolume is the name of the volume that mounts init.sql.
+const sqliteInitSQLVolume = "sqlite-init-sql"
+
 // SidecarInjector is a mutating admission webhook that injects a Litestream
 // replication sidecar into pods belonging to annotated Deployments.
 //
@@ -191,7 +197,72 @@ func (s *SidecarInjector) inject(pod *corev1.Pod, db *databasev1.SQLiteDB) error
 		},
 	})
 
+	// Inject the init container when InitSQL is configured.
+	if db.Spec.InitSQL != "" {
+		s.injectInitContainer(pod, db, volumeName)
+	}
+
 	return nil
+}
+
+// injectInitContainer adds an init container that applies InitSQL to the
+// database exactly once, guarded by a SHA-256 hash marker file on the PVC.
+// The marker file lives at {databasePath}/.sqlite-init-{hash} so it persists
+// across pod restarts; a change in InitSQL produces a new hash and a new
+// marker, triggering re-application on the next rollout.
+func (s *SidecarInjector) injectInitContainer(pod *corev1.Pod, db *databasev1.SQLiteDB, dataVolumeName string) {
+	initImage := db.Spec.InitImage
+	if initImage == "" {
+		initImage = "keinos/sqlite3:latest"
+	}
+
+	dbFullPath := db.Spec.DatabasePath + "/" + db.Spec.DatabaseName
+
+	// The shell script runs inside the init container:
+	//   1. Compute the SHA-256 hash of init.sql.
+	//   2. If the hash marker file does not exist, apply the SQL and create it.
+	//   3. Exit 0 in both cases so pod startup is never blocked by a prior run.
+	script := fmt.Sprintf(`
+HASH=$(sha256sum /init/init.sql | cut -d' ' -f1)
+MARKER="%s/.sqlite-init-${HASH}"
+if [ ! -f "${MARKER}" ]; then
+  sqlite3 "%s" < /init/init.sql
+  touch "${MARKER}"
+  echo "sqlite-init: applied init SQL (hash ${HASH})"
+else
+  echo "sqlite-init: already applied (hash ${HASH}), skipping"
+fi
+`, db.Spec.DatabasePath, dbFullPath)
+
+	initContainer := corev1.Container{
+		Name:    sqliteInitContainerName,
+		Image:   initImage,
+		Command: []string{"sh", "-c", script},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      dataVolumeName,
+				MountPath: db.Spec.DatabasePath,
+			},
+			{
+				Name:      sqliteInitSQLVolume,
+				MountPath: "/init",
+				ReadOnly:  true,
+			},
+		},
+	}
+
+	pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
+
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: sqliteInitSQLVolume,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: db.Name + "-init-sql",
+				},
+			},
+		},
+	})
 }
 
 // findVolumeForPath returns the name of a volume whose mount path in the first

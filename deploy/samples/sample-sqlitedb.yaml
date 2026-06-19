@@ -19,3 +19,12 @@ spec:
         secretRef: myapp-s3-creds      # Secret with access-key-id / secret-access-key
     retention:
       count: 10
+  # Optional: seed the database schema on first use.
+  # Applied exactly once per unique content hash; safe to update as you add tables.
+  initSQL: |
+    CREATE TABLE IF NOT EXISTS users (
+      id    INTEGER PRIMARY KEY AUTOINCREMENT,
+      name  TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE
+    );
+  # initImage: keinos/sqlite3:latest  # override if needed

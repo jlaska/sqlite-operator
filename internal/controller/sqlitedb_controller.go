@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -83,6 +84,11 @@ func (r *SQLiteDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
+	if err := r.reconcileInitSQLConfig(ctx, sqliteDB); err != nil {
+		log.Error(err, "Failed to reconcile init SQL ConfigMap")
+		return ctrl.Result{}, err
+	}
+
 	if err := r.reconcileTargetAnnotation(ctx, sqliteDB); err != nil {
 		log.Error(err, "Failed to annotate target Deployment")
 		return ctrl.Result{}, err
@@ -141,6 +147,63 @@ func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB
 	}
 
 	return cfg
+}
+
+// initSQLHash returns the hex-encoded SHA-256 digest of the given SQL string.
+func initSQLHash(sql string) string {
+	h := sha256.Sum256([]byte(sql))
+	return fmt.Sprintf("%x", h)
+}
+
+// reconcileInitSQLConfig creates or updates the ConfigMap that holds init.sql
+// and records the content hash in the status. When InitSQL is empty, any
+// existing ConfigMap is left in place (owned resources are GC'd on CR deletion).
+func (r *SQLiteDBReconciler) reconcileInitSQLConfig(ctx context.Context, sqliteDB *databasev1.SQLiteDB) error {
+	if sqliteDB.Spec.InitSQL == "" {
+		// No init SQL — clear the hash from status if it was previously set.
+		if sqliteDB.Status.InitSQLHash != "" {
+			sqliteDB.Status.InitSQLHash = ""
+			setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionInitSQLApplied,
+				metav1.ConditionFalse, "NoInitSQL",
+				"no initSQL configured",
+				sqliteDB.Generation, metav1.Now())
+			return r.Status().Update(ctx, sqliteDB)
+		}
+		return nil
+	}
+
+	hash := initSQLHash(sqliteDB.Spec.InitSQL)
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sqliteDB.Name + "-init-sql",
+			Namespace: sqliteDB.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Data = map[string]string{
+			"init.sql": sqliteDB.Spec.InitSQL,
+		}
+		return controllerutil.SetControllerReference(sqliteDB, cm, r.Scheme)
+	})
+	if err != nil {
+		return err
+	}
+
+	// Update status hash and condition only when they differ to avoid
+	// unnecessary status writes on every reconcile.
+	if sqliteDB.Status.InitSQLHash == hash {
+		return nil
+	}
+
+	sqliteDB.Status.InitSQLHash = hash
+	setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionInitSQLApplied,
+		metav1.ConditionTrue, "ConfigMapReady",
+		fmt.Sprintf("init SQL ConfigMap ready (hash %.8s…)", hash),
+		sqliteDB.Generation, metav1.Now())
+
+	return r.Status().Update(ctx, sqliteDB)
 }
 
 // reconcileTargetAnnotation adds injection annotations to the target

@@ -182,4 +182,79 @@ var _ = Describe("SQLiteDB Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(Equal(statusSyncInterval))
 	})
+
+	Context("init SQL management", func() {
+		const initSQL = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
+
+		It("creates the init-sql ConfigMap when InitSQL is set", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-init-sql", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["init.sql"]).To(Equal(initSQL))
+		})
+
+		It("records the SHA-256 hash in status.InitSQLHash", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(initSQL)))
+		})
+
+		It("updates the ConfigMap and hash when InitSQL changes", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Change the SQL.
+			newSQL := initSQL + "\nCREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY);"
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = newSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-init-sql", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["init.sql"]).To(Equal(newSQL))
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(newSQL)))
+		})
+
+		It("sets InitSQLApplied condition to True when ConfigMap is ready", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionInitSQLApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("ConfigMapReady"))
+		})
+	})
 })
