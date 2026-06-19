@@ -87,6 +87,68 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# ── Integration tests ─────────────────────────────────────────────────────
+# Three-target design:
+#   test-integration-setup   — create Kind cluster, install prerequisites
+#   test-integration         — run Go tests (assumes setup is done)
+#   test-integration-teardown — destroy Kind cluster
+#   kind-test-integration    — all-in-one for CI or local full run
+
+INTEGRATION_KIND_CLUSTER ?= sqlite-operator-integration
+CERT_MANAGER_VERSION ?= v1.16.3
+
+# After setup, kubeconfig is exported here so Go tests find the right cluster.
+INTEGRATION_KUBECONFIG ?= /tmp/sqlite-integration-kubeconfig
+
+.PHONY: test-integration-setup
+test-integration-setup: docker-build ## Create Kind cluster and install prerequisites for integration tests
+	@command -v $(KIND) >/dev/null 2>&1 || { echo "kind not found"; exit 1; }
+	@command -v helm   >/dev/null 2>&1 || { echo "helm not found"; exit 1; }
+
+	@echo "==> Creating Kind cluster $(INTEGRATION_KIND_CLUSTER)"
+	$(KIND) create cluster --name $(INTEGRATION_KIND_CLUSTER) --wait 120s \
+		|| echo "(cluster already exists, continuing)"
+
+	@echo "==> Exporting kubeconfig to $(INTEGRATION_KUBECONFIG)"
+	$(KIND) export kubeconfig --name $(INTEGRATION_KIND_CLUSTER) \
+		--kubeconfig $(INTEGRATION_KUBECONFIG)
+
+	@echo "==> Loading operator image into Kind"
+	$(KIND) load docker-image $(IMG) --name $(INTEGRATION_KIND_CLUSTER)
+
+	@echo "==> Installing cert-manager $(CERT_MANAGER_VERSION)"
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl apply -f \
+		https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl -n cert-manager wait \
+		--for=condition=Available deployment/cert-manager-webhook --timeout=5m
+
+	@echo "==> Deploying sqlite-operator via Helm"
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) helm upgrade --install sqlite-operator charts/sqlite-operator \
+		--namespace sqlite-operator-system --create-namespace \
+		--set image.repository=$(REGISTRY)/$(ORG)/$(IMAGE_NAME) \
+		--set image.tag=$(VERSION) \
+		--set image.pullPolicy=Never \
+		--wait --timeout 5m
+
+	@echo "==> Setup complete. Run 'make test-integration' to execute tests."
+
+.PHONY: test-integration
+test-integration: ## Run integration tests against the current KUBECONFIG cluster (run setup first)
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) \
+		go test ./test/integration/... -v -timeout 20m
+
+.PHONY: test-integration-teardown
+test-integration-teardown: ## Destroy the integration test Kind cluster
+	@$(KIND) delete cluster --name $(INTEGRATION_KIND_CLUSTER) || true
+	@rm -f $(INTEGRATION_KUBECONFIG)
+
+.PHONY: kind-test-integration
+kind-test-integration: ## Full integration test cycle: setup → test → teardown (CI-ready)
+	$(MAKE) test-integration-setup
+	$(MAKE) test-integration \
+		|| ($(MAKE) test-integration-teardown && exit 1)
+	$(MAKE) test-integration-teardown
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
