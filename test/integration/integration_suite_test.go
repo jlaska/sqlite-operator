@@ -88,12 +88,19 @@ var _ = AfterSuite(func() {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-// kubectl runs a kubectl command and fails the test on error.
+// kubectl runs a kubectl command and fails the test immediately on error.
+// Do NOT call this inside Eventually — use kubectlQ instead.
 func kubectl(args ...string) string {
-	cmd := exec.Command("kubectl", args...)
-	out, err := utils.Run(cmd)
+	out, err := kubectlQ(args...)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "kubectl %v failed:\n%s", args, out)
 	return out
+}
+
+// kubectlQ runs kubectl and returns (output, error) without failing the test.
+// Use inside Eventually so errors cause a retry rather than aborting the spec.
+func kubectlQ(args ...string) (string, error) {
+	cmd := exec.Command("kubectl", args...)
+	return utils.Run(cmd)
 }
 
 // runIgnoreError runs a command and swallows any error (for idempotent ops).

@@ -25,199 +25,207 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// ── Scenario 1: Sidecar Injection ─────────────────────────────────────────
+// All integration scenarios run in a single Ordered container so Ginkgo's
+// randomiser cannot reorder them. Scenario 3 (Restore) depends on the backup
+// data created by Scenario 2 (Backup), which in turn builds on the injection
+// verified in Scenario 1.
+var _ = Describe("Integration", Ordered, func() {
 
-var _ = Describe("Sidecar Injection", Ordered, func() {
-	const (
-		appName    = "inject-test-app"
-		dbName     = "inject-test-db"
-		pvcName    = "inject-test-pvc"
-		dbFile     = "inject.db"
-		dbPath     = "/data"
-	)
+	// ── Scenario 1: Sidecar Injection ─────────────────────────────────────
 
-	BeforeAll(func() {
-		By("creating test PVC")
-		applyLiteral(pvcManifest(pvcName, testNamespace))
+	Describe("Sidecar Injection", func() {
+		const (
+			appName = "inject-test-app"
+			dbName  = "inject-test-db"
+			pvcName = "inject-test-pvc"
+			dbFile  = "inject.db"
+			dbPath  = "/data"
+		)
 
-		By("creating test app Deployment (no init containers, no sidecar yet)")
-		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		BeforeAll(func() {
+			By("creating test PVC")
+			applyLiteral(pvcManifest(pvcName, testNamespace))
 
-		By("waiting for initial app pod to be Running")
-		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
-			"--for=condition=Available", "--timeout=3m")
+			By("creating test app Deployment")
+			applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+
+			By("waiting for initial app pod to be Running")
+			kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+				"--for=condition=Available", "--timeout=3m")
+		})
+
+		AfterAll(func() {
+			runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
+			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
+			runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
+		})
+
+		It("injects the Litestream sidecar into new pods after SQLiteDB CR is created", func() {
+			By("creating a SQLiteDB CR (backup disabled — just test injection)")
+			applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, false, ""))
+
+			By("waiting for the controller to label and annotate the pod template")
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("get", "deployment", appName, "-n", testNamespace,
+					"-o", `jsonpath={.spec.template.metadata.labels.sqlite\.database\.example\.com/inject}`)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("true"))
+			}).Should(Succeed())
+
+			By("waiting for rolling update to produce a pod with the Litestream sidecar")
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("get", "pods", "-n", testNamespace,
+					"-l", "app="+appName,
+					"-o", `jsonpath={range .items[*]}{range .spec.containers[*]}{.name}{"\n"}{end}{end}`)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("litestream"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("confirming SidecarInjected condition is True on the SQLiteDB")
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="SidecarInjected")].status}`)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("True"))
+			}).Should(Succeed())
+		})
 	})
 
-	AfterAll(func() {
-		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
-	})
+	// ── Scenario 2: Backup to MinIO ───────────────────────────────────────
 
-	It("injects the Litestream sidecar into new pods after SQLiteDB CR is created", func() {
-		By("creating a SQLiteDB CR (backup disabled — just test injection)")
-		applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, false, ""))
-
-		By("waiting for the controller to annotate the Deployment's pod template")
-		Eventually(func(g Gomega) {
-			out := kubectl("get", "deployment", appName, "-n", testNamespace,
-				"-o", `jsonpath={.spec.template.metadata.annotations.sqlite\.database\.example\.com/inject}`)
-			g.Expect(out).To(Equal("true"))
-		}).Should(Succeed())
-
-		By("waiting for a rolling update to complete with the Litestream sidecar")
-		Eventually(func(g Gomega) {
-			out := kubectl("get", "pods", "-n", testNamespace,
-				"-l", "app="+appName,
-				"-o", `jsonpath={range .items[*]}{range .spec.containers[*]}{.name}{"\n"}{end}{end}`)
-			g.Expect(out).To(ContainSubstring("litestream"))
-		}).Should(Succeed())
-
-		By("confirming the SQLiteDB Ready condition reflects the injected state")
-		Eventually(func(g Gomega) {
-			out := kubectl("get", "sqlitedb", dbName, "-n", testNamespace,
-				"-o", `jsonpath={.status.conditions[?(@.type=="SidecarInjected")].status}`)
-			g.Expect(out).To(Equal("True"))
-		}).Should(Succeed())
-	})
-})
-
-// ── Scenario 2: Backup to MinIO ───────────────────────────────────────────
-
-var _ = Describe("Backup to MinIO", Ordered, func() {
-	const (
-		appName = "backup-test-app"
-		dbName  = "backup-test-db"
-		pvcName = "backup-test-pvc"
-		dbFile  = "backup.db"
-		dbPath  = "/data"
-		initSQL = `CREATE TABLE IF NOT EXISTS events (
+	Describe("Backup to MinIO", func() {
+		const (
+			appName = "backup-test-app"
+			dbName  = "backup-test-db"
+			pvcName = "backup-test-pvc"
+			dbFile  = "backup.db"
+			dbPath  = "/data"
+			initSQL = `CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message TEXT,
   ts DATETIME DEFAULT CURRENT_TIMESTAMP
 );`
-	)
+		)
 
-	BeforeAll(func() {
-		By("creating test PVC")
-		applyLiteral(pvcManifest(pvcName, testNamespace))
+		BeforeAll(func() {
+			By("creating test PVC")
+			applyLiteral(pvcManifest(pvcName, testNamespace))
 
-		By("creating test app Deployment")
-		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+			By("creating test app Deployment")
+			applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
 
-		By("waiting for initial app pod to be Running")
-		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
-			"--for=condition=Available", "--timeout=3m")
+			By("waiting for initial pod to be Running")
+			kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+				"--for=condition=Available", "--timeout=3m")
 
-		By("creating SQLiteDB CR with backup enabled and initSQL")
-		applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+			By("creating SQLiteDB CR with backup enabled and initSQL")
+			applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
 
-		By("waiting for sidecar injection rollout to complete")
-		Eventually(func(g Gomega) {
-			out := kubectl("get", "pods", "-n", testNamespace,
-				"-l", "app="+appName,
-				"-o", `jsonpath={range .items[*]}{range .spec.containers[*]}{.name}{"\n"}{end}{end}`)
-			g.Expect(out).To(ContainSubstring("litestream"))
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+			By("waiting for sidecar injection rollout to complete (2/2 containers)")
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("get", "pods", "-n", testNamespace,
+					"-l", "app="+appName,
+					"-o", `jsonpath={range .items[*]}{range .spec.containers[*]}{.name}{"\n"}{end}{end}`)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("litestream"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		AfterAll(func() {
+			// Leave the SQLiteDB and its backup intact — Scenario 3 restores from it.
+			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
+		})
+
+		It("init container applies initSQL and creates the events table", func() {
+			podName := runningPod(appName)
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("exec", "-n", testNamespace, podName, "-c", "app",
+					"--", "sqlite3", dbPath+"/"+dbFile, ".tables")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("events"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("Litestream replicates WAL changes to the MinIO bucket", func() {
+			podName := runningPod(appName)
+
+			By("writing a row to the database")
+			kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+				"--", "sqlite3", dbPath+"/"+dbFile,
+				"INSERT INTO events(message) VALUES('integration-test-backup');")
+
+			By("waiting for Litestream to replicate to MinIO")
+			Eventually(func(g Gomega) {
+				out := mcList(minioBucket + "/" + dbName + "/")
+				g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying BackupHealthy condition is True on the SQLiteDB")
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("True"))
+			}).Should(Succeed())
+		})
 	})
 
-	AfterAll(func() {
-		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
+	// ── Scenario 3: SQLiteRestore ─────────────────────────────────────────
+
+	Describe("SQLiteRestore", func() {
+		const (
+			sourceDBName  = "backup-test-db" // backup created by Scenario 2
+			restoreName   = "integration-restore"
+			restorePVC    = "restore-target-pvc"
+			restoreTarget = "/restore/backup.db"
+		)
+
+		BeforeAll(func() {
+			By("creating the restore target PVC")
+			applyLiteral(pvcManifest(restorePVC, testNamespace))
+		})
+
+		AfterAll(func() {
+			runIgnoreError("kubectl", "delete", "sqliterestore", restoreName, "-n", testNamespace, "--ignore-not-found")
+			runIgnoreError("kubectl", "delete", "sqlitedb", sourceDBName, "-n", testNamespace, "--ignore-not-found")
+			runIgnoreError("kubectl", "delete", "pvc", restorePVC, "-n", testNamespace, "--ignore-not-found")
+			runIgnoreError("kubectl", "delete", "pvc", "backup-test-pvc", "-n", testNamespace, "--ignore-not-found")
+		})
+
+		It("restore Job completes and database file appears on the target PVC", func() {
+			By("creating a SQLiteRestore CR")
+			applyLiteral(sqliteRestoreManifest(restoreName, testNamespace, sourceDBName, restorePVC, restoreTarget))
+
+			By("waiting for the restore Job to be created")
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("get", "jobs", "-n", testNamespace,
+					"-l", "sqlite.database.example.com/restore="+restoreName,
+					"-o", "jsonpath={.items[0].metadata.name}")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).NotTo(BeEmpty())
+			}).Should(Succeed())
+
+			By("waiting for the restore Job to Complete (up to 5 minutes)")
+			Eventually(func(g Gomega) {
+				out, err := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
+					"-o", "jsonpath={.status.phase}")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Complete"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("running a verification Job that reads the restored database")
+			verifyJobName := "verify-restore"
+			applyLiteral(verifyRestoreJobManifest(verifyJobName, testNamespace, restorePVC, restoreTarget))
+			kubectl("wait", "-n", testNamespace, "job/"+verifyJobName,
+				"--for=condition=Complete", "--timeout=3m")
+
+			logs := kubectl("logs", "-n", testNamespace, "job/"+verifyJobName)
+			Expect(logs).To(ContainSubstring("events"),
+				"restored database should contain the events table")
+		})
 	})
 
-	It("init container applies initSQL idempotently", func() {
-		By("getting the running pod name")
-		podName := runningPod(appName)
-
-		By("verifying the events table was created by the init container")
-		Eventually(func(g Gomega) {
-			out := kubectl("exec", "-n", testNamespace, podName, "-c", "app",
-				"--", "sqlite3", dbPath+"/"+dbFile, ".tables")
-			g.Expect(out).To(ContainSubstring("events"))
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
-	})
-
-	It("Litestream replicates WAL changes to the MinIO bucket", func() {
-		podName := runningPod(appName)
-
-		By("writing a row to the database")
-		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
-			"--", "sqlite3", dbPath+"/"+dbFile,
-			"INSERT INTO events(message) VALUES('integration-test-backup');")
-
-		By("waiting for Litestream to replicate to MinIO (polls mc ls)")
-		Eventually(func(g Gomega) {
-			out := mcList(minioBucket + "/" + dbName + "/")
-			g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
-		}, 3*time.Minute, 10*time.Second).Should(Succeed())
-
-		By("verifying BackupHealthy condition is True on the SQLiteDB")
-		Eventually(func(g Gomega) {
-			out := kubectl("get", "sqlitedb", dbName, "-n", testNamespace,
-				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
-			g.Expect(out).To(Equal("True"))
-		}).Should(Succeed())
-	})
-})
-
-// ── Scenario 3: SQLiteRestore ─────────────────────────────────────────────
-
-var _ = Describe("SQLiteRestore", Ordered, func() {
-	const (
-		// Reuse the backup created in Scenario 2.
-		sourceDBName  = "backup-test-db"
-		restoreName   = "integration-restore"
-		restorePVC    = "restore-target-pvc"
-		restoreTarget = "/restore/backup.db"
-	)
-
-	BeforeAll(func() {
-		By("creating the restore target PVC")
-		applyLiteral(pvcManifest(restorePVC, testNamespace))
-	})
-
-	AfterAll(func() {
-		runIgnoreError("kubectl", "delete", "sqliterestore", restoreName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "pvc", restorePVC, "-n", testNamespace, "--ignore-not-found")
-	})
-
-	It("restore Job completes successfully and the database file appears on the target PVC", func() {
-		By("creating a SQLiteRestore CR")
-		applyLiteral(sqliteRestoreManifest(restoreName, testNamespace, sourceDBName, restorePVC, restoreTarget))
-
-		By("waiting for the restore Job to be created")
-		Eventually(func(g Gomega) {
-			out := kubectl("get", "jobs", "-n", testNamespace,
-				"-l", "sqlite.database.example.com/restore="+restoreName,
-				"-o", "jsonpath={.items[0].metadata.name}")
-			g.Expect(out).NotTo(BeEmpty())
-		}).Should(Succeed())
-
-		By("waiting for the restore Job to complete (up to 5 minutes)")
-		Eventually(func(g Gomega) {
-			out := kubectl("get", "sqliterestore", restoreName, "-n", testNamespace,
-				"-o", "jsonpath={.status.phase}")
-			g.Expect(out).To(Equal("Complete"),
-				"restore phase should be Complete, not %q", out)
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
-
-		By("verifying the restored database file exists on the target PVC")
-		out := kubectl("get", "sqliterestore", restoreName, "-n", testNamespace,
-			"-o", "jsonpath={.status.message}")
-		Expect(out).To(ContainSubstring("successfully"))
-
-		By("running a verification Job that reads the restored database")
-		verifyJobName := "verify-restore"
-		applyLiteral(verifyRestoreJobManifest(verifyJobName, testNamespace, restorePVC, restoreTarget))
-		kubectl("wait", "-n", testNamespace, "job/"+verifyJobName,
-			"--for=condition=Complete", "--timeout=3m")
-
-		logs := kubectl("logs", "-n", testNamespace, "job/"+verifyJobName)
-		Expect(logs).To(ContainSubstring("events"), "restored database should contain the events table")
-	})
-})
+}) // end Integration Ordered
 
 // ── Manifest builders ──────────────────────────────────────────────────────
 
@@ -285,7 +293,6 @@ func sqliteDBManifest(name, ns, target, dbFile, dbPath string, backupEnabled boo
 
 	initSQLBlock := ""
 	if initSQL != "" {
-		// Indent for YAML literal block.
 		lines := strings.Split(initSQL, "\n")
 		indented := make([]string, len(lines))
 		for i, l := range lines {
@@ -351,16 +358,20 @@ spec:
 
 // runningPod returns the name of a Running pod for the given Deployment.
 func runningPod(deploymentName string) string {
-	out := kubectl("get", "pods", "-n", testNamespace,
-		"-l", "app="+deploymentName,
-		"--field-selector=status.phase=Running",
-		"-o", "jsonpath={.items[0].metadata.name}")
-	Expect(out).NotTo(BeEmpty(), "no Running pod found for deployment %s", deploymentName)
-	return strings.TrimSpace(out)
+	var podName string
+	Eventually(func(g Gomega) {
+		out, err := kubectlQ("get", "pods", "-n", testNamespace,
+			"-l", "app="+deploymentName,
+			"--field-selector=status.phase=Running",
+			"-o", "jsonpath={.items[0].metadata.name}")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(out).NotTo(BeEmpty())
+		podName = strings.TrimSpace(out)
+	}, 2*time.Minute, 5*time.Second).Should(Succeed())
+	return podName
 }
 
-// mcList runs `mc ls` against the MinIO service using a temporary pod with the
-// mc client image. Returns the listing output or empty string on error.
+// mcList runs `mc ls` against the MinIO service using a one-shot pod.
 func mcList(path string) string {
 	podName := fmt.Sprintf("mc-ls-%d", time.Now().UnixMilli())
 	out, _ := runCmd("kubectl", "run", podName,

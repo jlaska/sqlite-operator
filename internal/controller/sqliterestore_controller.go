@@ -113,7 +113,6 @@ func (r *SQLiteRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, r.syncJobStatus(ctx, restore, job)
 }
 
-
 // buildRestoreJob constructs the Job that runs `litestream restore`.
 func (r *SQLiteRestoreReconciler) buildRestoreJob(
 	restore *databasev1.SQLiteRestore,
@@ -147,13 +146,18 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: restore.Namespace,
+			// Label the Job itself so it can be found with a label selector.
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by":            "sqlite-operator",
+				"sqlite.database.example.com/restore":     restore.Name,
+			},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app.kubernetes.io/managed-by": "sqlite-operator",
+						"app.kubernetes.io/managed-by":        "sqlite-operator",
 						"sqlite.database.example.com/restore": restore.Name,
 					},
 				},
