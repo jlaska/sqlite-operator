@@ -88,33 +88,62 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 # ── Integration tests ─────────────────────────────────────────────────────
-# Three-target design:
-#   test-integration-setup   — create Kind cluster, install prerequisites
-#   test-integration         — run Go tests (assumes setup is done)
-#   test-integration-teardown — destroy Kind cluster
-#   kind-test-integration    — all-in-one for CI or local full run
+# Usage:
+#   make kind-test-integration            — full CI cycle (create, test, destroy)
+#   make test-integration-setup           — create cluster + install prereqs
+#   make test-integration                 — run tests (setup already done)
+#   make test-integration-teardown        — destroy cluster
+#
+# Variables:
+#   INTEGRATION_KIND_CLUSTER   cluster name (default: sqlite-operator-integration)
+#   INTEGRATION_KUBECONFIG     kubeconfig written by setup (default: /tmp/sqlite-integration-kubeconfig)
+#   INTEGRATION_SKIP_CLUSTER_CREATE=true  skip 'kind create' (use existing cluster)
+#   INTEGRATION_KEEP_NAMESPACE=true       leave test namespace after run (for debugging)
+#
+# Podman support:
+#   When CONTAINER_TOOL=podman (or podman is the only available runtime),
+#   the setup target sets KIND_EXPERIMENTAL_PROVIDER=podman automatically.
 
-INTEGRATION_KIND_CLUSTER ?= sqlite-operator-integration
-CERT_MANAGER_VERSION ?= v1.16.3
+INTEGRATION_KIND_CLUSTER     ?= sqlite-operator-integration
+INTEGRATION_KUBECONFIG       ?= /tmp/sqlite-integration-kubeconfig
+INTEGRATION_SKIP_CLUSTER_CREATE ?= false
+CERT_MANAGER_VERSION         ?= v1.16.3
 
-# After setup, kubeconfig is exported here so Go tests find the right cluster.
-INTEGRATION_KUBECONFIG ?= /tmp/sqlite-integration-kubeconfig
+# Detect whether to use the Podman provider for Kind.
+# Covers: explicit CONTAINER_TOOL=podman, and the common macOS case where the
+# `docker` binary is Podman in Docker-compat mode (identified by "podman"
+# appearing in `docker info` output).
+# grep -c returns the number of matching lines (0 when absent).
+_PODMAN_DETECTED := $(shell $(CONTAINER_TOOL) info 2>/dev/null | grep -ci podman 2>/dev/null || echo 0)
+_KIND_PROVIDER_ENV =
+ifeq ($(CONTAINER_TOOL),podman)
+_KIND_PROVIDER_ENV = KIND_EXPERIMENTAL_PROVIDER=podman
+else ifneq ($(_PODMAN_DETECTED),0)
+_KIND_PROVIDER_ENV = KIND_EXPERIMENTAL_PROVIDER=podman
+endif
 
 .PHONY: test-integration-setup
-test-integration-setup: docker-build ## Create Kind cluster and install prerequisites for integration tests
-	@command -v $(KIND) >/dev/null 2>&1 || { echo "kind not found"; exit 1; }
-	@command -v helm   >/dev/null 2>&1 || { echo "helm not found"; exit 1; }
+test-integration-setup: docker-build ## Create Kind cluster (with Podman support) and install prerequisites
+	@command -v $(KIND) >/dev/null 2>&1 || { echo "Error: kind not found"; exit 1; }
+	@command -v helm   >/dev/null 2>&1 || { echo "Error: helm not found"; exit 1; }
 
-	@echo "==> Creating Kind cluster $(INTEGRATION_KIND_CLUSTER)"
-	$(KIND) create cluster --name $(INTEGRATION_KIND_CLUSTER) --wait 120s \
-		|| echo "(cluster already exists, continuing)"
+	@if [ "$(INTEGRATION_SKIP_CLUSTER_CREATE)" = "true" ]; then \
+		echo "==> INTEGRATION_SKIP_CLUSTER_CREATE=true — skipping cluster creation"; \
+	else \
+		echo "==> Creating Kind cluster $(INTEGRATION_KIND_CLUSTER) (provider: $(_KIND_PROVIDER_ENV:-docker))"; \
+		$(_KIND_PROVIDER_ENV) $(KIND) create cluster \
+			--name $(INTEGRATION_KIND_CLUSTER) --wait 120s \
+			|| echo "(cluster may already exist — continuing)"; \
+	fi
 
-	@echo "==> Exporting kubeconfig to $(INTEGRATION_KUBECONFIG)"
-	$(KIND) export kubeconfig --name $(INTEGRATION_KIND_CLUSTER) \
+	@echo "==> Exporting kubeconfig → $(INTEGRATION_KUBECONFIG)"
+	$(_KIND_PROVIDER_ENV) $(KIND) export kubeconfig \
+		--name $(INTEGRATION_KIND_CLUSTER) \
 		--kubeconfig $(INTEGRATION_KUBECONFIG)
 
 	@echo "==> Loading operator image into Kind"
-	$(KIND) load docker-image $(IMG) --name $(INTEGRATION_KIND_CLUSTER)
+	$(_KIND_PROVIDER_ENV) $(KIND) load docker-image $(IMG) \
+		--name $(INTEGRATION_KIND_CLUSTER)
 
 	@echo "==> Installing cert-manager $(CERT_MANAGER_VERSION)"
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl apply -f \
@@ -122,7 +151,7 @@ test-integration-setup: docker-build ## Create Kind cluster and install prerequi
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl -n cert-manager wait \
 		--for=condition=Available deployment/cert-manager-webhook --timeout=5m
 
-	@echo "==> Deploying sqlite-operator via Helm"
+	@echo "==> Deploying sqlite-operator via Helm (pullPolicy=Never — uses loaded image)"
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) helm upgrade --install sqlite-operator charts/sqlite-operator \
 		--namespace sqlite-operator-system --create-namespace \
 		--set image.repository=$(REGISTRY)/$(ORG)/$(IMAGE_NAME) \
@@ -130,23 +159,25 @@ test-integration-setup: docker-build ## Create Kind cluster and install prerequi
 		--set image.pullPolicy=Never \
 		--wait --timeout 5m
 
-	@echo "==> Setup complete. Run 'make test-integration' to execute tests."
+	@echo ""
+	@echo "✓ Setup complete. Run 'make test-integration' to execute tests."
 
 .PHONY: test-integration
-test-integration: ## Run integration tests against the current KUBECONFIG cluster (run setup first)
+test-integration: ## Run integration tests (requires setup to be done first)
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) \
 		go test ./test/integration/... -v -timeout 20m
 
 .PHONY: test-integration-teardown
 test-integration-teardown: ## Destroy the integration test Kind cluster
-	@$(KIND) delete cluster --name $(INTEGRATION_KIND_CLUSTER) || true
+	$(_KIND_PROVIDER_ENV) $(KIND) delete cluster \
+		--name $(INTEGRATION_KIND_CLUSTER) || true
 	@rm -f $(INTEGRATION_KUBECONFIG)
 
 .PHONY: kind-test-integration
 kind-test-integration: ## Full integration test cycle: setup → test → teardown (CI-ready)
 	$(MAKE) test-integration-setup
 	$(MAKE) test-integration \
-		|| ($(MAKE) test-integration-teardown && exit 1)
+		|| ($(MAKE) test-integration-teardown; exit 1)
 	$(MAKE) test-integration-teardown
 
 .PHONY: lint
