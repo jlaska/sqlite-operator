@@ -129,38 +129,43 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 		image = defaultLitestreamImage
 	}
 
-	// Build the litestream restore command.
-	// Source URL: s3://bucket/path/databaseName
-	s3URL := fmt.Sprintf("s3://%s/%s%s", s3.Bucket, s3.Path, sourceDB.Spec.DatabaseName)
-	args := []string{"restore", "-o", restore.Spec.TargetPath}
+	// litestream restore -config /etc/litestream/litestream.yml \
+	//                    [-timestamp <ts>]                        \
+	//                    -o <targetPath>                          \
+	//                    <dbPathInConfig>
+	//
+	// The db path must match the 'dbs[].path' key in litestream.yml so
+	// Litestream can look up the replica config (endpoint, bucket, path).
+	// Litestream has no env-var equivalent for the S3 endpoint — it must
+	// come from the config file.
+	dbPathInConfig := sourceDB.Spec.DatabasePath + "/" + sourceDB.Spec.DatabaseName
+	args := []string{
+		"restore",
+		"-config", "/etc/litestream/litestream.yml",
+		"-o", restore.Spec.TargetPath,
+	}
 	if restore.Spec.Timestamp != "" {
 		args = append(args, "-timestamp", restore.Spec.Timestamp)
 	}
-	args = append(args, s3URL)
+	args = append(args, dbPathInConfig)
 
-	// Mount the target PVC at the directory portion of TargetPath.
 	mountPath := dirOf(restore.Spec.TargetPath)
+	jobLabels := map[string]string{
+		"app.kubernetes.io/managed-by":        "sqlite-operator",
+		"sqlite.database.example.com/restore": restore.Name,
+	}
 
 	backoffLimit := int32(3)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: restore.Namespace,
-			// Label the Job itself so it can be found with a label selector.
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by":            "sqlite-operator",
-				"sqlite.database.example.com/restore":     restore.Name,
-			},
+			Labels:    jobLabels,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app.kubernetes.io/managed-by":        "sqlite-operator",
-						"sqlite.database.example.com/restore": restore.Name,
-					},
-				},
+				ObjectMeta: metav1.ObjectMeta{Labels: jobLabels},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyOnFailure,
 					Containers: []corev1.Container{
@@ -168,12 +173,12 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 							Name:  "litestream-restore",
 							Image: image,
 							Args:  args,
-							Env:   s3EnvVars(s3.SecretRef, s3.Endpoint),
+							// Credentials via env vars (supported by Litestream).
+							// Endpoint is read from the mounted litestream.yml config.
+							Env: s3EnvVars(s3.SecretRef),
 							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "target",
-									MountPath: mountPath,
-								},
+								{Name: "target", MountPath: mountPath},
+								{Name: "litestream-config", MountPath: "/etc/litestream", ReadOnly: true},
 							},
 						},
 					},
@@ -186,6 +191,17 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 								},
 							},
 						},
+						{
+							// Source DB's litestream.yml contains the S3 endpoint.
+							Name: "litestream-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: sourceDB.Name + "-litestream",
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -194,10 +210,13 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 	return job
 }
 
-// s3EnvVars returns the S3 credential environment variables sourced from the
-// named Secret, plus an optional endpoint override.
-func s3EnvVars(secretRef, endpoint string) []corev1.EnvVar {
-	envVars := []corev1.EnvVar{
+// s3EnvVars returns S3 credential env vars sourced from the named Secret.
+// Litestream supports LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY
+// as fallbacks for AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+// The S3 endpoint is NOT settable via env var in Litestream — it must come
+// from the litestream.yml config file (mounted via buildRestoreJob).
+func s3EnvVars(secretRef string) []corev1.EnvVar {
+	return []corev1.EnvVar{
 		{
 			Name: "LITESTREAM_ACCESS_KEY_ID",
 			ValueFrom: &corev1.EnvVarSource{
@@ -217,13 +236,6 @@ func s3EnvVars(secretRef, endpoint string) []corev1.EnvVar {
 			},
 		},
 	}
-	if endpoint != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  "LITESTREAM_ENDPOINT",
-			Value: endpoint,
-		})
-	}
-	return envVars
 }
 
 // syncJobStatus maps Job conditions onto the SQLiteRestore status.

@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,13 +35,13 @@ import (
 
 var _ = Describe("SQLiteRestore Controller", func() {
 	const (
-		restoreName    = "test-restore"
-		sourceDBName   = "source-db"
-		targetPVC      = "restore-pvc"
-		targetPath     = "/data/myapp.db"
-		secretRef      = "s3-creds"
-		bucketName     = "my-backups"
-		namespaceName  = "default"
+		restoreName   = "test-restore"
+		sourceDBName  = "source-db"
+		targetPVC     = "restore-pvc"
+		targetPath    = "/data/myapp.db"
+		secretRef     = "s3-creds"
+		bucketName    = "my-backups"
+		namespaceName = "default"
 	)
 
 	ctx := context.Background()
@@ -133,10 +134,12 @@ var _ = Describe("SQLiteRestore Controller", func() {
 		Expect(container.Name).To(Equal("litestream-restore"))
 		Expect(container.Image).To(ContainSubstring("litestream"))
 
-		// Should include -o <targetPath> and the S3 URL.
+		// Should use -config flag (endpoint comes from config file, not env var).
+		Expect(container.Args).To(ContainElement("-config"))
+		Expect(container.Args).To(ContainElement("/etc/litestream/litestream.yml"))
+		// Should include -o <targetPath> and the db path from the source SQLiteDB spec.
 		Expect(container.Args).To(ContainElement("-o"))
 		Expect(container.Args).To(ContainElement(targetPath))
-		Expect(container.Args).To(ContainElement(ContainSubstring(bucketName)))
 
 		// Should inject S3 credential env vars from the secret.
 		envNames := make([]string, len(container.Env))
@@ -164,12 +167,29 @@ var _ = Describe("SQLiteRestore Controller", func() {
 		}, job)).To(Succeed())
 
 		volumes := job.Spec.Template.Spec.Volumes
-		Expect(volumes).To(HaveLen(1))
-		Expect(volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(targetPVC))
+		// Two volumes: target PVC + litestream-config ConfigMap.
+		Expect(volumes).To(HaveLen(2))
+		var pvcVol, cmVol corev1.Volume
+		for _, v := range volumes {
+			if v.PersistentVolumeClaim != nil {
+				pvcVol = v
+			}
+			if v.ConfigMap != nil {
+				cmVol = v
+			}
+		}
+		Expect(pvcVol.PersistentVolumeClaim.ClaimName).To(Equal(targetPVC))
+		Expect(cmVol.ConfigMap.Name).To(Equal(sourceDBName + "-litestream"))
 
 		mounts := job.Spec.Template.Spec.Containers[0].VolumeMounts
-		Expect(mounts).To(HaveLen(1))
-		Expect(mounts[0].MountPath).To(Equal("/data")) // dirOf("/data/myapp.db")
+		// Two mounts: target PVC at /data and litestream-config at /etc/litestream.
+		Expect(mounts).To(HaveLen(2))
+		mountPaths := make([]string, len(mounts))
+		for i, m := range mounts {
+			mountPaths[i] = m.MountPath
+		}
+		Expect(mountPaths).To(ContainElement("/data"))           // dirOf("/data/myapp.db")
+		Expect(mountPaths).To(ContainElement("/etc/litestream")) // config file
 	})
 
 	It("includes -timestamp arg when PITR timestamp is set", func() {
