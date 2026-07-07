@@ -23,7 +23,7 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 .PHONY: all
-all: build
+all: help
 
 ##@ General
 
@@ -87,7 +87,7 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
-# ── Integration tests ─────────────────────────────────────────────────────
+##@ Integration Tests
 # Usage:
 #   make kind-test-integration            — full CI cycle (create, test, destroy)
 #   make test-integration-setup           — create cluster + install prereqs
