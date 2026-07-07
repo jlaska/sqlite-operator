@@ -350,10 +350,17 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # Run as root so we can read the litestream-restored file (created as root:root 600).
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
       containers:
         - name: verify
           image: keinos/sqlite3:latest
           command: ["sqlite3", "%s", ".tables"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
           volumeMounts:
             - name: data
               mountPath: /restore
