@@ -275,6 +275,29 @@ release-prepare: version ci-deploy-manifests helm-package ## Prepare files for r
 	@echo "Release files:"
 	@ls -la release/
 
+# CHART_VER strips the leading 'v' for Chart.yaml (semver doesn't include it).
+CHART_VER := $(VERSION:v%=%)
+
+.PHONY: chart-version-sync
+chart-version-sync: ## Sync charts/sqlite-operator/Chart.yaml version and appVersion from Makefile.versions
+	@echo "Syncing Chart.yaml to version $(CHART_VER)"
+	@sed -i.bak \
+		-e 's/^version:.*/version: $(CHART_VER)/' \
+		-e 's/^appVersion:.*/appVersion: "$(CHART_VER)"/' \
+		charts/sqlite-operator/Chart.yaml
+	@rm -f charts/sqlite-operator/Chart.yaml.bak
+
+.PHONY: tag
+tag: chart-version-sync ## Commit version bump + Chart.yaml, create and push git tag (run after version-bump-*)
+	@echo "Tagging release $(VERSION)"
+	git add Makefile.versions charts/sqlite-operator/Chart.yaml
+	git commit -m "chore: release $(VERSION)"
+	git tag $(VERSION) -m "Release $(VERSION)"
+	git push origin HEAD
+	git push origin $(VERSION)
+	@echo ""
+	@echo "✓ Tag $(VERSION) pushed — CI will build and publish the release"
+
 .PHONY: docker-build-multiarch
 docker-build-multiarch: ## Build multi-architecture Docker image
 	$(CONTAINER_TOOL) buildx build --platform=linux/amd64,linux/arm64 --push -t ${IMG} .

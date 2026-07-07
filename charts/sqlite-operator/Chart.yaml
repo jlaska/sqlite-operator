@@ -2,8 +2,8 @@ apiVersion: v2
 name: sqlite-operator
 description: A Kubernetes operator for managing SQLite databases with Litestream backup
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 keywords:
   - sqlite
   - database
