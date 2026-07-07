@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -132,7 +133,16 @@ func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB
 		s3 := sqliteDB.Spec.Backup.Destination.S3
 		cfg += "      - type: s3\n"
 		if s3.Endpoint != "" {
-			cfg += fmt.Sprintf("        endpoint: %s\n", s3.Endpoint)
+			// Ensure the endpoint has a scheme. Litestream defaults to HTTPS
+			// when no scheme is present, which breaks plain-HTTP S3-compatible
+			// stores like MinIO without TLS. Preserve any existing scheme.
+			endpoint := s3.Endpoint
+			if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+				endpoint = "http://" + endpoint
+			}
+			cfg += fmt.Sprintf("        endpoint: %s\n", endpoint)
+			// MinIO and other S3-compatible stores require path-style addressing.
+			cfg += "        force-path-style: true\n"
 		}
 		cfg += fmt.Sprintf("        bucket: %s\n", s3.Bucket)
 		if s3.Path != "" {

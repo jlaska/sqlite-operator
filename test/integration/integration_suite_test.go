@@ -124,6 +124,17 @@ func applyLiteral(yaml string) {
 
 func minioManifest() string {
 	return fmt.Sprintf(`
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: %s
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -151,6 +162,13 @@ spec:
           ports:
             - containerPort: 9000
             - containerPort: 9001
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
 ---
 apiVersion: v1
 kind: Service
@@ -164,7 +182,7 @@ spec:
     - name: api
       port: 9000
       targetPort: 9000
-`, testNamespace, minioUser, minioPass, testNamespace)
+`, testNamespace, testNamespace, minioUser, minioPass, testNamespace)
 }
 
 func createBucketJobManifest() string {

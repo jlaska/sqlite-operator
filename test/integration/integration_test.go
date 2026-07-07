@@ -207,10 +207,20 @@ var _ = Describe("Integration", Ordered, func() {
 
 			By("waiting for the restore Job to Complete (up to 5 minutes)")
 			Eventually(func(g Gomega) {
-				out, err := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
+				phase, err := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
 					"-o", "jsonpath={.status.phase}")
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(out).To(Equal("Complete"))
+				if phase == "Failed" {
+					// Print job pod logs to help debug.
+					jobName, _ := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
+						"-o", "jsonpath={.status.jobName}")
+					if jobName != "" {
+						logs, _ := kubectlQ("logs", "-n", testNamespace,
+							"job/"+jobName, "--tail=50")
+						GinkgoWriter.Printf("\n=== restore Job logs ===\n%s\n========================\n", logs)
+					}
+				}
+				g.Expect(phase).To(Equal("Complete"))
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
 			By("running a verification Job that reads the restored database")
