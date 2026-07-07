@@ -40,6 +40,7 @@ var _ = Describe("SQLiteDB Controller", func() {
 		namespaceName  = "default"
 		databaseName   = "myapp.db"
 		databasePath   = "/data"
+		appLabel       = "app" // goconst: used as label key in test Deployment
 	)
 
 	ctx := context.Background()
@@ -62,10 +63,10 @@ var _ = Describe("SQLiteDB Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: namespaceName},
 				Spec: appsv1.DeploymentSpec{
 					Selector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"app": deploymentName},
+						MatchLabels: map[string]string{appLabel: deploymentName},
 					},
 					Template: corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": deploymentName}},
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: deploymentName}},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
 						},

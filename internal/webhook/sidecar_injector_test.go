@@ -37,12 +37,16 @@ import (
 
 var _ = Describe("SidecarInjector", func() {
 	const (
-		namespace      = "default"
-		sqliteDBName   = "test-db"
-		deploymentName = "test-app"
-		databaseName   = "myapp.db"
-		databasePath   = "/data"
-		volumeName     = "app-data"
+		namespace         = "default"
+		sqliteDBName      = "test-db"
+		deploymentName    = "test-app"
+		databaseName      = "myapp.db"
+		databasePath      = "/data"
+		volumeName        = "app-data"
+		appContainerName  = "app"     // goconst
+		appContainerImage = "busybox" // goconst
+		litestreamName    = "litestream" // goconst
+		injectTrue        = "true"    // goconst
 	)
 
 	ctx := context.Background()
@@ -81,15 +85,15 @@ var _ = Describe("SidecarInjector", func() {
 				Name:      "test-pod",
 				Namespace: namespace,
 				Annotations: map[string]string{
-					databasev1.AnnotationInject: "true",
+					databasev1.AnnotationInject: injectTrue,
 					databasev1.AnnotationConfig: configRef,
 				},
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
-						Name:  "app",
-						Image: "busybox",
+						Name:  appContainerName,
+						Image: appContainerImage,
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: volumeName, MountPath: databasePath},
 						},
@@ -140,7 +144,7 @@ var _ = Describe("SidecarInjector", func() {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "plain-pod", Namespace: namespace},
 			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+				Containers: []corev1.Container{{Name: "app", Image: appContainerImage}},
 			},
 		}
 		resp := newInjector().Handle(ctx, makeRequest(pod))
@@ -159,12 +163,12 @@ var _ = Describe("SidecarInjector", func() {
 		for i, c := range patched.Spec.Containers {
 			containerNames[i] = c.Name
 		}
-		Expect(containerNames).To(ContainElement("litestream"))
+		Expect(containerNames).To(ContainElement(litestreamName))
 
 		// The sidecar must mount the same data volume.
 		var sidecar corev1.Container
 		for _, c := range patched.Spec.Containers {
-			if c.Name == "litestream" {
+			if c.Name == litestreamName {
 				sidecar = c
 				break
 			}
@@ -186,7 +190,7 @@ var _ = Describe("SidecarInjector", func() {
 
 		// Simulate the pod already having the sidecar injected.
 		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
-			Name: "litestream", Image: "litestream/litestream:0.3.13",
+			Name: litestreamName, Image: "litestream/litestream:0.3.13",
 		})
 		second := injector.Handle(ctx, makeRequest(pod))
 		Expect(second.Allowed).To(BeTrue())
@@ -208,7 +212,7 @@ var _ = Describe("SidecarInjector", func() {
 		patched := applyPatches(pod, resp.Patches)
 		var sidecar corev1.Container
 		for _, c := range patched.Spec.Containers {
-			if c.Name == "litestream" {
+			if c.Name == litestreamName {
 				sidecar = c
 				break
 			}
@@ -229,7 +233,10 @@ var _ = Describe("SidecarInjector init container", func() {
 		databaseName = "app.db"
 		databasePath = "/data"
 		volumeName   = "app-data"
-		initSQL      = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
+		initSQL           = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
+		injectTrue        = "true"    // goconst: mirrors constant in first Describe
+		appContainerName  = "app"     // goconst: mirrors constant in first Describe
+		appContainerImage = "busybox" // goconst: mirrors constant in first Describe
 	)
 
 	ctx := context.Background()
@@ -249,7 +256,7 @@ var _ = Describe("SidecarInjector init container", func() {
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
-					Name: "app", Image: "busybox",
+					Name: "app", Image: appContainerImage,
 					VolumeMounts: []corev1.VolumeMount{{Name: volumeName, MountPath: databasePath}},
 				}},
 				Volumes: []corev1.Volume{{
@@ -297,7 +304,7 @@ var _ = Describe("SidecarInjector init container", func() {
 
 	It("injects an init container when InitSQL is set", func() {
 		annotations := map[string]string{
-			databasev1.AnnotationInject: "true",
+			databasev1.AnnotationInject: injectTrue,
 			databasev1.AnnotationConfig: namespace + "/" + sqliteDBName,
 		}
 		pod := newPod(annotations)
@@ -314,7 +321,7 @@ var _ = Describe("SidecarInjector init container", func() {
 
 	It("init container script references the correct database path", func() {
 		annotations := map[string]string{
-			databasev1.AnnotationInject: "true",
+			databasev1.AnnotationInject: injectTrue,
 			databasev1.AnnotationConfig: namespace + "/" + sqliteDBName,
 		}
 		pod := newPod(annotations)
@@ -346,7 +353,7 @@ var _ = Describe("SidecarInjector init container", func() {
 		defer func() { _ = k8sClient.Delete(ctx, noInitDB) }()
 
 		annotations := map[string]string{
-			databasev1.AnnotationInject: "true",
+			databasev1.AnnotationInject: injectTrue,
 			databasev1.AnnotationConfig: namespace + "/no-init-db",
 		}
 		pod := newPod(annotations)

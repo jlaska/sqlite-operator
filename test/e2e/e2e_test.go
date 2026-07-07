@@ -134,7 +134,9 @@ var _ = Describe("Manager", Ordered, func() {
 		}
 	})
 
-	SetDefaultEventuallyTimeout(2 * time.Minute)
+	// 5 minutes: cert-manager certificate issuance can take >2 min in CI
+	// after webhooks and cert-manager resources were added to the deploy.
+	SetDefaultEventuallyTimeout(5 * time.Minute)
 	SetDefaultEventuallyPollingInterval(time.Second)
 
 	Context("Manager", func() {

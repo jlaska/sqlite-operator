@@ -283,6 +283,7 @@ var _ = Describe("SQLiteRestore Controller", func() {
 
 	It("fails immediately when the referenced SQLiteDB has backup disabled", func() {
 		// Create a separate restore referencing a DB with backup off.
+		const badRestoreName = "bad-restore"
 		noBackupDB := &databasev1.SQLiteDB{
 			ObjectMeta: metav1.ObjectMeta{Name: "no-backup-db", Namespace: namespaceName},
 			Spec: databasev1.SQLiteDBSpec{
@@ -296,7 +297,7 @@ var _ = Describe("SQLiteRestore Controller", func() {
 		defer func() { _ = k8sClient.Delete(ctx, noBackupDB) }()
 
 		badRestore := &databasev1.SQLiteRestore{
-			ObjectMeta: metav1.ObjectMeta{Name: "bad-restore", Namespace: namespaceName},
+			ObjectMeta: metav1.ObjectMeta{Name: badRestoreName, Namespace: namespaceName},
 			Spec: databasev1.SQLiteRestoreSpec{
 				SourceRef:  "no-backup-db",
 				TargetPVC:  targetPVC,
@@ -307,11 +308,11 @@ var _ = Describe("SQLiteRestore Controller", func() {
 		defer func() { _ = k8sClient.Delete(ctx, badRestore) }()
 
 		_, err := newRestoreReconciler().Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: "bad-restore", Namespace: namespaceName},
+			NamespacedName: types.NamespacedName{Name: badRestoreName, Namespace: namespaceName},
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "bad-restore", Namespace: namespaceName}, badRestore)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: badRestoreName, Namespace: namespaceName}, badRestore)).To(Succeed())
 		Expect(badRestore.Status.Phase).To(Equal(databasev1.RestorePhaseFailed))
 	})
 })
