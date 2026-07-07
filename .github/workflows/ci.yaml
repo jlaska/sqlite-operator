@@ -153,16 +153,8 @@ jobs:
     - name: Generate manifests
       run: make manifests
 
-    - name: Update image in kustomization
-      run: |
-        cd deploy
-        kustomize edit set image controller=${{ needs.build.outputs.image }}
-
-    - name: Create release manifests
-      run: |
-        mkdir -p release
-        kustomize build deploy > release/sqlite-operator.yaml
-        kustomize build deploy/samples > release/samples.yaml
+    - name: Create release artifacts
+      run: make ci-deploy-manifests
 
     - name: Upload release artifacts
       uses: actions/upload-artifact@v5

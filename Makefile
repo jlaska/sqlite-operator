@@ -241,12 +241,10 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 .PHONY: ci-build
 ci-build: manifests generate fmt vet test docker-build ## Full CI build pipeline
 
-.PHONY: ci-deploy-manifests  
-ci-deploy-manifests: manifests kustomize ## Generate deployment manifests for CI/CD
+.PHONY: ci-deploy-manifests
+ci-deploy-manifests: manifests ## Generate release artifacts (Helm chart replaces kustomize deploy/)
 	mkdir -p release
-	cd deploy && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build deploy > release/sqlite-operator.yaml
-	$(KUSTOMIZE) build deploy/samples > release/samples.yaml
+	cp deploy/samples/sample-sqlitedb.yaml release/samples.yaml
 
 .PHONY: helm-lint
 helm-lint: ## Lint the Helm chart
@@ -282,8 +280,8 @@ docker-build-multiarch: ## Build multi-architecture Docker image
 	$(CONTAINER_TOOL) buildx build --platform=linux/amd64,linux/arm64 --push -t ${IMG} .
 
 .PHONY: update-deploy-image
-update-deploy-image: ## Update image in deploy kustomization
-	cd deploy && $(KUSTOMIZE) edit set image controller=${IMG}
+update-deploy-image: ## Update image tag in Helm chart values
+	sed -i.bak 's|^  tag:.*|  tag: "$(VERSION)"|' charts/sqlite-operator/values.yaml && rm -f charts/sqlite-operator/values.yaml.bak
 
 ##@ Deployment
 
