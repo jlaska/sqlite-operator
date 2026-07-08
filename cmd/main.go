@@ -132,6 +132,13 @@ func main() {
 		})
 	}
 
+	// webhooksEnabled is true when a cert path is provided. Without a cert the
+	// webhook server cannot serve TLS, so we skip registration entirely.
+	// Production installs use the Helm chart which provisions the cert via
+	// cert-manager and passes --webhook-cert-path automatically.
+	// make deploy (kustomize development path) runs without webhooks.
+	webhooksEnabled := len(webhookCertPath) > 0
+
 	webhookServer := webhook.NewServer(webhook.Options{
 		TLSOpts: webhookTLSOpts,
 	})
@@ -184,7 +191,7 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
+		WebhookServer:          webhookServer, // only used when webhooksEnabled
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "dc63c944.example.com",
@@ -223,17 +230,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&sqlitewebhook.SQLiteDBValidator{}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "SQLiteDB")
-		os.Exit(1)
-	}
+	if webhooksEnabled {
+		if err := (&sqlitewebhook.SQLiteDBValidator{}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SQLiteDB")
+			os.Exit(1)
+		}
 
-	mgr.GetWebhookServer().Register("/mutate-core-v1-pod", &webhook.Admission{
-		Handler: &sqlitewebhook.SidecarInjector{
-			Client:  mgr.GetClient(),
-			Decoder: admission.NewDecoder(mgr.GetScheme()),
-		},
-	})
+		mgr.GetWebhookServer().Register("/mutate-core-v1-pod", &webhook.Admission{
+			Handler: &sqlitewebhook.SidecarInjector{
+				Client:  mgr.GetClient(),
+				Decoder: admission.NewDecoder(mgr.GetScheme()),
+			},
+		})
+		setupLog.Info("Webhooks enabled", "certPath", webhookCertPath)
+	} else {
+		setupLog.Info("Webhooks disabled: --webhook-cert-path not set; use Helm chart for production webhook support")
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
