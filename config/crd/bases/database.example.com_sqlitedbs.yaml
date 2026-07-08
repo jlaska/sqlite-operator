@@ -95,22 +95,16 @@ spec:
                       active.
                     type: boolean
                   retention:
-                    description: Retention controls how many snapshots are kept.
+                    description: Retention controls how long backup data is kept.
                     properties:
-                      count:
-                        default: 10
-                        description: Count is the number of snapshots to retain. Older
-                          snapshots are pruned.
-                        format: int32
-                        minimum: 1
-                        type: integer
+                      duration:
+                        default: 720h
+                        description: |-
+                          Duration is how long to retain backup data, expressed as a Go duration
+                          string (e.g. "720h" for 30 days, "168h" for 7 days).
+                          Litestream 0.5.x uses duration-based retention.
+                        type: string
                     type: object
-                  schedule:
-                    description: |-
-                      Schedule is the cron expression for periodic snapshot uploads
-                      (e.g. "0 */6 * * *" for every 6 hours). Litestream streams WAL
-                      continuously regardless; this controls full snapshot frequency.
-                    type: string
                 required:
                 - enabled
                 type: object
@@ -125,7 +119,7 @@ spec:
                   configured to watch DatabasePath/DatabaseName.
                 type: string
               image:
-                default: litestream/litestream:0.3.13
+                default: litestream/litestream:0.5.14
                 description: Image overrides the Litestream container image used for
                   the sidecar.
                 type: string

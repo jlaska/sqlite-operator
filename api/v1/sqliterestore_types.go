@@ -55,7 +55,7 @@ type SQLiteRestoreSpec struct {
 
 	// Image overrides the Litestream container image used for the restore Job.
 	// Defaults to the image specified in the referenced SQLiteDB, or
-	// litestream/litestream:0.3.13 if neither is set.
+	// litestream/litestream:0.5.14 if neither is set.
 	Image string `json:"image,omitempty"`
 }
 

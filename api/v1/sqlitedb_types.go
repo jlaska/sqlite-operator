@@ -46,12 +46,13 @@ type BackupDestination struct {
 	S3 *S3Destination `json:"s3,omitempty"`
 }
 
-// RetentionPolicy defines how many snapshots to keep.
+// RetentionPolicy defines how long Litestream retains backup data.
 type RetentionPolicy struct {
-	// Count is the number of snapshots to retain. Older snapshots are pruned.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=10
-	Count int32 `json:"count,omitempty"`
+	// Duration is how long to retain backup data, expressed as a Go duration
+	// string (e.g. "720h" for 30 days, "168h" for 7 days).
+	// Litestream 0.5.x uses duration-based retention.
+	// +kubebuilder:default="720h"
+	Duration string `json:"duration,omitempty"`
 }
 
 // BackupSpec defines the Litestream backup configuration.
@@ -60,15 +61,10 @@ type BackupSpec struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
 
-	// Schedule is the cron expression for periodic snapshot uploads
-	// (e.g. "0 */6 * * *" for every 6 hours). Litestream streams WAL
-	// continuously regardless; this controls full snapshot frequency.
-	Schedule string `json:"schedule,omitempty"`
-
 	// Destination specifies where backups are stored.
 	Destination BackupDestination `json:"destination,omitempty"`
 
-	// Retention controls how many snapshots are kept.
+	// Retention controls how long backup data is kept.
 	Retention RetentionPolicy `json:"retention,omitempty"`
 }
 
@@ -90,7 +86,7 @@ type SQLiteDBSpec struct {
 	TargetDeployment string `json:"targetDeployment"`
 
 	// Image overrides the Litestream container image used for the sidecar.
-	// +kubebuilder:default="litestream/litestream:0.3.13"
+	// +kubebuilder:default="litestream/litestream:0.5.14"
 	Image string `json:"image,omitempty"`
 
 	// Backup defines the Litestream replication / backup configuration.

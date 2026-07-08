@@ -70,7 +70,7 @@ spec:
         path: paperless/
         secretRef: minio-creds
     retention:
-      count: 10                          # keep last 10 snapshots
+      duration: "720h"              # 30 days (Litestream 0.5.x duration-based retention)
 ```
 
 Apply it:
@@ -142,14 +142,13 @@ sqlite-operator is to SQLite what [CloudNativePG](https://cloudnative-pg.io) is 
 | `spec.targetDeployment` | string | ✓ | Name of the existing Deployment to inject into |
 | `spec.databasePath` | string | ✓ | Directory path inside the app container (e.g. `/data`) |
 | `spec.databaseName` | string | ✓ | Filename of the SQLite database (e.g. `app.db`) |
-| `spec.image` | string | | Litestream image override (default: `litestream/litestream:0.3.13`) |
+| `spec.image` | string | | Litestream image override (default: `litestream/litestream:0.5.14`) |
 | `spec.backup.enabled` | bool | | Enable Litestream replication (default: `false`) |
-| `spec.backup.schedule` | string | | Cron expression for snapshot uploads (e.g. `"0 */6 * * *"`) |
 | `spec.backup.destination.s3.endpoint` | string | | S3-compatible endpoint URL (e.g. `minio.homelab:9000`); omit for AWS S3 |
 | `spec.backup.destination.s3.bucket` | string | ✓ (when enabled) | S3 bucket name |
 | `spec.backup.destination.s3.path` | string | | Key prefix within the bucket |
 | `spec.backup.destination.s3.secretRef` | string | ✓ (when enabled) | Secret containing `access-key-id` and `secret-access-key` |
-| `spec.backup.retention.count` | int | | Number of snapshots to retain (default: `10`) |
+| `spec.backup.retention.duration` | string | | How long to retain backups as a duration string (default: `"720h"`) |
 | `spec.initSQL` | string | | SQL statements applied once on first use (idempotent via content hash) |
 | `spec.initImage` | string | | Init container image for applying `initSQL` (default: `keinos/sqlite3:latest`) |
 
@@ -244,7 +243,7 @@ spec:
 
 ```yaml
 spec:
-  image: litestream/litestream:0.3.13
+  image: litestream/litestream:0.5.14
 ```
 
 ---
@@ -267,7 +266,7 @@ Key values:
 | `webhook.failurePolicy` | `Fail` | Webhook failure policy |
 | `certManager.enabled` | `true` | Use cert-manager for webhook TLS |
 | `certManager.secretName` | `sqlite-operator-webhook-cert` | TLS secret name |
-| `litestream.defaultImage` | `litestream/litestream:0.3.13` | Default sidecar image |
+| `litestream.defaultImage` | `litestream/litestream:0.5.14` | Default sidecar image |
 
 ---
 

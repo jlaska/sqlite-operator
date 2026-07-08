@@ -298,7 +298,7 @@ func sqliteDBManifest(name, ns, target, dbFile, dbPath string, backupEnabled boo
         path: %s/
         secretRef: minio-creds
     retention:
-      count: 5`, minioEndpoint, minioBucket, name)
+      duration: "720h"`, minioEndpoint, minioBucket, name)
 	}
 
 	initSQLBlock := ""

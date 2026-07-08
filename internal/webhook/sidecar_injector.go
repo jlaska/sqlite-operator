@@ -138,7 +138,7 @@ func (s *SidecarInjector) inject(pod *corev1.Pod, db *databasev1.SQLiteDB) error
 
 	image := db.Spec.Image
 	if image == "" {
-		image = "litestream/litestream:0.3.13"
+		image = "litestream/litestream:0.5.14"
 	}
 
 	sidecar := corev1.Container{

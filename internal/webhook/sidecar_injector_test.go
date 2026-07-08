@@ -190,7 +190,7 @@ var _ = Describe("SidecarInjector", func() {
 
 		// Simulate the pod already having the sidecar injected.
 		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
-			Name: litestreamName, Image: "litestream/litestream:0.3.13",
+			Name: litestreamName, Image: "litestream/litestream:0.5.14",
 		})
 		second := injector.Handle(ctx, makeRequest(pod))
 		Expect(second.Allowed).To(BeTrue())

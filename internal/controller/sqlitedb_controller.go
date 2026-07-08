@@ -124,14 +124,16 @@ func (r *SQLiteDBReconciler) reconcileLitestreamConfig(ctx context.Context, sqli
 }
 
 // buildLitestreamConfig renders the litestream.yml content for the given CR.
+// Uses the singular `replica:` key (Litestream 0.5.x preferred form).
 func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB) string {
 	dbPath := fmt.Sprintf("%s/%s", sqliteDB.Spec.DatabasePath, sqliteDB.Spec.DatabaseName)
 
-	cfg := fmt.Sprintf("dbs:\n  - path: %s\n    replicas:\n", dbPath)
+	cfg := fmt.Sprintf("dbs:\n  - path: %s\n", dbPath)
 
 	if sqliteDB.Spec.Backup.Enabled && sqliteDB.Spec.Backup.Destination.S3 != nil {
 		s3 := sqliteDB.Spec.Backup.Destination.S3
-		cfg += "      - type: s3\n"
+		cfg += "    replica:\n"
+		cfg += "      type: s3\n"
 		if s3.Endpoint != "" {
 			// Ensure the endpoint has a scheme. Litestream defaults to HTTPS
 			// when no scheme is present, which breaks plain-HTTP S3-compatible
@@ -140,19 +142,16 @@ func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB
 			if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
 				endpoint = "http://" + endpoint
 			}
-			cfg += fmt.Sprintf("        endpoint: %s\n", endpoint)
+			cfg += fmt.Sprintf("      endpoint: %s\n", endpoint)
 			// MinIO and other S3-compatible stores require path-style addressing.
-			cfg += "        force-path-style: true\n"
+			cfg += "      force-path-style: true\n"
 		}
-		cfg += fmt.Sprintf("        bucket: %s\n", s3.Bucket)
+		cfg += fmt.Sprintf("      bucket: %s\n", s3.Bucket)
 		if s3.Path != "" {
-			cfg += fmt.Sprintf("        path: %s\n", s3.Path)
+			cfg += fmt.Sprintf("      path: %s\n", s3.Path)
 		}
-		if sqliteDB.Spec.Backup.Schedule != "" {
-			cfg += fmt.Sprintf("        snapshot-interval: %s\n", sqliteDB.Spec.Backup.Schedule)
-		}
-		if sqliteDB.Spec.Backup.Retention.Count > 0 {
-			cfg += fmt.Sprintf("        retention: %d\n", sqliteDB.Spec.Backup.Retention.Count)
+		if sqliteDB.Spec.Backup.Retention.Duration != "" {
+			cfg += fmt.Sprintf("      retention: %s\n", sqliteDB.Spec.Backup.Retention.Duration)
 		}
 	}
 

@@ -35,7 +35,7 @@ import (
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 )
 
-const defaultLitestreamImage = "litestream/litestream:0.3.13"
+const defaultLitestreamImage = "litestream/litestream:0.5.14"
 
 // SQLiteRestoreReconciler reconciles a SQLiteRestore object.
 type SQLiteRestoreReconciler struct {

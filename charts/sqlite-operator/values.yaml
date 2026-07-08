@@ -79,7 +79,7 @@ certManager:
 litestream:
   ## Default Litestream image injected into annotated pods.
   ## Users can override per-SQLiteDB CR via spec.image.
-  defaultImage: litestream/litestream:0.3.13
+  defaultImage: litestream/litestream:0.5.14
 
 ## Metrics service
 metrics:
