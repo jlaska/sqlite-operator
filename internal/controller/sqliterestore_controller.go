@@ -222,7 +222,7 @@ func s3EnvVars(secretRef string) []corev1.EnvVar {
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: secretRef},
-					Key:                  "access-key-id",
+					Key:                  "ACCESS_KEY_ID",
 				},
 			},
 		},
@@ -231,7 +231,7 @@ func s3EnvVars(secretRef string) []corev1.EnvVar {
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: secretRef},
-					Key:                  "secret-access-key",
+					Key:                  "SECRET_ACCESS_KEY",
 				},
 			},
 		},

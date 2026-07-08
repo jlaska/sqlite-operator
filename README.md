@@ -39,8 +39,8 @@ helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
 
 ```bash
 kubectl create secret generic minio-creds \
-  --from-literal=access-key-id=<your-access-key> \
-  --from-literal=secret-access-key=<your-secret-key> \
+  --from-literal=ACCESS_KEY_ID=<your-access-key> \
+  --from-literal=SECRET_ACCESS_KEY=<your-secret-key> \
   --namespace my-app
 ```
 
@@ -147,7 +147,7 @@ sqlite-operator is to SQLite what [CloudNativePG](https://cloudnative-pg.io) is 
 | `spec.backup.destination.s3.endpoint` | string | | S3-compatible endpoint URL (e.g. `minio.homelab:9000`); omit for AWS S3 |
 | `spec.backup.destination.s3.bucket` | string | ✓ (when enabled) | S3 bucket name |
 | `spec.backup.destination.s3.path` | string | | Key prefix within the bucket |
-| `spec.backup.destination.s3.secretRef` | string | ✓ (when enabled) | Secret containing `access-key-id` and `secret-access-key` |
+| `spec.backup.destination.s3.secretRef` | string | ✓ (when enabled) | Secret containing `ACCESS_KEY_ID` and `SECRET_ACCESS_KEY` |
 | `spec.backup.retention.duration` | string | | How long to retain backups as a duration string (default: `"720h"`) |
 | `spec.initSQL` | string | | SQL statements applied once on first use (idempotent via content hash) |
 | `spec.initImage` | string | | Init container image for applying `initSQL` (default: `keinos/sqlite3:latest`) |

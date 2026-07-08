@@ -71,8 +71,8 @@ var _ = BeforeSuite(func() {
 	By("creating MinIO credentials Secret")
 	runIgnoreError("kubectl", "create", "secret", "generic", "minio-creds",
 		"-n", testNamespace,
-		"--from-literal=access-key-id="+minioUser,
-		"--from-literal=secret-access-key="+minioPass,
+		"--from-literal=ACCESS_KEY_ID="+minioUser,
+		"--from-literal=SECRET_ACCESS_KEY="+minioPass,
 	)
 })
 

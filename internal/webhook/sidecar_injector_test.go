@@ -43,10 +43,10 @@ var _ = Describe("SidecarInjector", func() {
 		databaseName      = "myapp.db"
 		databasePath      = "/data"
 		volumeName        = "app-data"
-		appContainerName  = "app"     // goconst
-		appContainerImage = "busybox" // goconst
+		appContainerName  = "app"        // goconst
+		appContainerImage = "busybox"    // goconst
 		litestreamName    = "litestream" // goconst
-		injectTrue        = "true"    // goconst
+		injectTrue        = "true"       // goconst
 	)
 
 	ctx := context.Background()
@@ -227,12 +227,12 @@ var _ = Describe("SidecarInjector", func() {
 
 var _ = Describe("SidecarInjector init container", func() {
 	const (
-		namespace    = "default"
-		sqliteDBName = "init-test-db"
-		deployName   = "init-test-app"
-		databaseName = "app.db"
-		databasePath = "/data"
-		volumeName   = "app-data"
+		namespace         = "default"
+		sqliteDBName      = "init-test-db"
+		deployName        = "init-test-app"
+		databaseName      = "app.db"
+		databasePath      = "/data"
+		volumeName        = "app-data"
 		initSQL           = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
 		injectTrue        = "true"    // goconst: mirrors constant in first Describe
 		appContainerName  = "app"     // goconst: mirrors constant in first Describe

@@ -34,7 +34,7 @@ type S3Destination struct {
 	Path string `json:"path,omitempty"`
 
 	// SecretRef names a Secret in the same namespace containing S3 credentials.
-	// The Secret must have keys: access-key-id, secret-access-key.
+	// The Secret must have keys: ACCESS_KEY_ID, SECRET_ACCESS_KEY.
 	// +kubebuilder:validation:Required
 	SecretRef string `json:"secretRef"`
 }

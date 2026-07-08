@@ -15,7 +15,7 @@ spec:
         endpoint: minio.homelab:9000   # remove for AWS S3
         bucket: sqlite-backups
         path: myapp/
-        secretRef: myapp-s3-creds      # Secret with access-key-id / secret-access-key
+        secretRef: myapp-s3-creds      # Secret with ACCESS_KEY_ID / SECRET_ACCESS_KEY
     retention:
       duration: "720h"                 # 30 days (Litestream 0.5.x duration-based retention)
   # Optional: seed the database schema on first use.
