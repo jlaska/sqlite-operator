@@ -205,7 +205,9 @@ jobs:
     - name: Push chart to OCI registry
       run: |
         VERSION=${GITHUB_REF_NAME#v}
-        helm push "release/sqlite-operator-${VERSION}.tgz" oci://ghcr.io/jlaska
+        # Push to ghcr.io/jlaska/charts/sqlite-operator to avoid colliding
+        # with the container image at ghcr.io/jlaska/sqlite-operator.
+        helm push "release/sqlite-operator-${VERSION}.tgz" oci://ghcr.io/jlaska/charts
 
     - name: Upload chart artifact
       uses: actions/upload-artifact@v5
@@ -254,7 +256,7 @@ jobs:
 
           ### Install with Helm
           ```bash
-          helm install sqlite-operator oci://ghcr.io/jlaska/sqlite-operator \
+          helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
             --version ${{ github.ref_name }} \
             --namespace sqlite-operator-system \
             --create-namespace

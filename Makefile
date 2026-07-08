@@ -260,8 +260,8 @@ helm-package: ## Package the Helm chart into release/
 
 .PHONY: helm-push
 helm-push: ## Push the Helm chart OCI artifact to the registry (requires helm registry login)
-	helm push release/sqlite-operator-$(VERSION:v%=%).tgz oci://$(REGISTRY)/$(ORG)
-	@echo "Chart available at: oci://$(REGISTRY)/$(ORG)/sqlite-operator"
+	helm push release/sqlite-operator-$(VERSION:v%=%).tgz oci://$(REGISTRY)/$(ORG)/charts
+	@echo "Chart available at: oci://$(REGISTRY)/$(ORG)/charts/sqlite-operator"
 
 .PHONY: helm-template
 helm-template: ## Render the Helm chart with default values (dry-run)

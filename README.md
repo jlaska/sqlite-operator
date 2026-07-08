@@ -17,7 +17,7 @@ sqlite-operator injects a [Litestream](https://litestream.io) sidecar into your 
 ### 1. Install the operator
 
 ```bash
-helm install sqlite-operator oci://ghcr.io/jlaska/sqlite-operator \
+helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
   --version 0.2.0 \
   --namespace sqlite-operator-system \
   --create-namespace
@@ -27,7 +27,7 @@ helm install sqlite-operator oci://ghcr.io/jlaska/sqlite-operator \
 >
 > To skip cert-manager (bring your own webhook TLS secret):
 > ```bash
-> helm install sqlite-operator oci://ghcr.io/jlaska/sqlite-operator \
+> helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
 >   --version 0.2.0 \
 >   --namespace sqlite-operator-system \
 >   --create-namespace \
@@ -252,7 +252,7 @@ spec:
 
 ```bash
 # List all available values
-helm show values oci://ghcr.io/jlaska/sqlite-operator --version 0.2.0
+helm show values oci://ghcr.io/jlaska/charts/sqlite-operator --version 0.2.0
 ```
 
 Key values:
