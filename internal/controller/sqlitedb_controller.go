@@ -171,12 +171,13 @@ func (r *SQLiteDBReconciler) reconcileInitSQLConfig(ctx context.Context, sqliteD
 	if sqliteDB.Spec.InitSQL == "" {
 		// No init SQL — clear the hash from status if it was previously set.
 		if sqliteDB.Status.InitSQLHash != "" {
+			patch := client.MergeFrom(sqliteDB.DeepCopy())
 			sqliteDB.Status.InitSQLHash = ""
 			setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionInitSQLApplied,
 				metav1.ConditionFalse, "NoInitSQL",
 				"no initSQL configured",
 				sqliteDB.Generation, metav1.Now())
-			return r.Status().Update(ctx, sqliteDB)
+			return r.Status().Patch(ctx, sqliteDB, patch)
 		}
 		return nil
 	}
@@ -206,13 +207,14 @@ func (r *SQLiteDBReconciler) reconcileInitSQLConfig(ctx context.Context, sqliteD
 		return nil
 	}
 
+	patch := client.MergeFrom(sqliteDB.DeepCopy())
 	sqliteDB.Status.InitSQLHash = hash
 	setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionInitSQLApplied,
 		metav1.ConditionTrue, "ConfigMapReady",
 		fmt.Sprintf("init SQL ConfigMap ready (hash %.8s…)", hash),
 		sqliteDB.Generation, metav1.Now())
 
-	return r.Status().Update(ctx, sqliteDB)
+	return r.Status().Patch(ctx, sqliteDB, patch)
 }
 
 // reconcileTargetAnnotation adds injection annotations to the target
@@ -331,6 +333,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 		Name:      sqliteDB.Spec.TargetDeployment,
 	}, deployment)
 
+	patch := client.MergeFrom(sqliteDB.DeepCopy())
 	now := metav1.Now()
 	sqliteDB.Status.ObservedGeneration = sqliteDB.Generation
 
@@ -348,7 +351,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReady,
 			metav1.ConditionFalse, "DeploymentNotFound", "target Deployment not found",
 			sqliteDB.Generation, now)
-		return r.Status().Update(ctx, sqliteDB)
+		return r.Status().Patch(ctx, sqliteDB, patch)
 	}
 
 	// --- SidecarInjected condition ---
@@ -412,7 +415,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 			sqliteDB.Generation, now)
 	}
 
-	return r.Status().Update(ctx, sqliteDB)
+	return r.Status().Patch(ctx, sqliteDB, patch)
 }
 
 // setCondition is a thin wrapper around meta.SetStatusCondition that fills in

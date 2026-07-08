@@ -294,6 +294,7 @@ func (r *SQLiteRestoreReconciler) setStatus(
 	startTime *metav1.Time,
 	completionTime *metav1.Time,
 ) error {
+	patch := client.MergeFrom(restore.DeepCopy())
 	restore.Status.Phase = phase
 	restore.Status.JobName = jobName
 	restore.Status.Message = message
@@ -303,7 +304,7 @@ func (r *SQLiteRestoreReconciler) setStatus(
 	if completionTime != nil {
 		restore.Status.CompletionTime = completionTime
 	}
-	return r.Status().Update(ctx, restore)
+	return r.Status().Patch(ctx, restore, patch)
 }
 
 // dirOf returns the directory portion of a file path.
