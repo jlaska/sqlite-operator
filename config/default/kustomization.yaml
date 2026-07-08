@@ -20,8 +20,10 @@ resources:
 - ../manager
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
+# Webhooks and cert-manager are handled by the Helm chart for production installs.
+# 'make deploy' (kustomize) is for quick development iteration without webhooks.
+# To enable via kustomize: uncomment the lines below and ensure cert-manager is installed.
 #- ../webhook
-# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'. 'WEBHOOK' components are required.
 #- ../certmanager
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
 #- ../prometheus
@@ -48,8 +50,7 @@ patches:
 #  target:
 #    kind: Deployment
 
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
-# crd/kustomization.yaml
+# [WEBHOOK] Uncomment to mount the webhook cert (requires certmanager enabled above)
 #- path: manager_webhook_patch.yaml
 #  target:
 #    kind: Deployment

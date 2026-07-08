@@ -1,0 +1,56 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "sqlite-operator.fullname" . }}-manager
+  labels:
+    {{- include "sqlite-operator.labels" . | nindent 4 }}
+rules:
+  # Manage SQLiteDB CRs
+  - apiGroups: ["database.example.com"]
+    resources: ["sqlitedbs"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["database.example.com"]
+    resources: ["sqlitedbs/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["database.example.com"]
+    resources: ["sqlitedbs/finalizers"]
+    verbs: ["update"]
+  # Annotate target Deployments; create Litestream ConfigMaps
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  # Manage SQLiteRestore CRs
+  - apiGroups: ["database.example.com"]
+    resources: ["sqliterestores"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["database.example.com"]
+    resources: ["sqliterestores/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["database.example.com"]
+    resources: ["sqliterestores/finalizers"]
+    verbs: ["update"]
+  # Restore Jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  # Pod inspection for backup health monitoring
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Events for backup health transitions
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  # Metrics endpoint auth
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]

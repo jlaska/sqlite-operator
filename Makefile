@@ -23,7 +23,7 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 .PHONY: all
-all: build
+all: help
 
 ##@ General
 
@@ -62,7 +62,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e | grep -v /integration) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -86,6 +86,99 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+##@ Integration Tests
+# Usage:
+#   make kind-test-integration            — full CI cycle (create, test, destroy)
+#   make test-integration-setup           — create cluster + install prereqs
+#   make test-integration                 — run tests (setup already done)
+#   make test-integration-teardown        — destroy cluster
+#
+# Variables:
+#   INTEGRATION_KIND_CLUSTER   cluster name (default: sqlite-operator-integration)
+#   INTEGRATION_KUBECONFIG     kubeconfig written by setup (default: /tmp/sqlite-integration-kubeconfig)
+#   INTEGRATION_SKIP_CLUSTER_CREATE=true  skip 'kind create' (use existing cluster)
+#   INTEGRATION_KEEP_NAMESPACE=true       leave test namespace after run (for debugging)
+#
+# Podman support:
+#   When CONTAINER_TOOL=podman (or podman is the only available runtime),
+#   the setup target sets KIND_EXPERIMENTAL_PROVIDER=podman automatically.
+
+INTEGRATION_KIND_CLUSTER     ?= sqlite-operator-integration
+INTEGRATION_KUBECONFIG       ?= /tmp/sqlite-integration-kubeconfig
+INTEGRATION_SKIP_CLUSTER_CREATE ?= false
+CERT_MANAGER_VERSION         ?= v1.16.3
+
+# Detect whether to use the Podman provider for Kind.
+# Covers: explicit CONTAINER_TOOL=podman, and the common macOS case where the
+# `docker` binary is Podman in Docker-compat mode (identified by "podman"
+# appearing in `docker info` output).
+# grep -c returns the number of matching lines (0 when absent).
+_PODMAN_DETECTED := $(shell $(CONTAINER_TOOL) info 2>/dev/null | grep -ci podman 2>/dev/null || echo 0)
+_KIND_PROVIDER_ENV =
+ifeq ($(CONTAINER_TOOL),podman)
+_KIND_PROVIDER_ENV = KIND_EXPERIMENTAL_PROVIDER=podman
+else ifneq ($(_PODMAN_DETECTED),0)
+_KIND_PROVIDER_ENV = KIND_EXPERIMENTAL_PROVIDER=podman
+endif
+
+.PHONY: test-integration-setup
+test-integration-setup: docker-build ## Create Kind cluster (with Podman support) and install prerequisites
+	@command -v $(KIND) >/dev/null 2>&1 || { echo "Error: kind not found"; exit 1; }
+	@command -v helm   >/dev/null 2>&1 || { echo "Error: helm not found"; exit 1; }
+
+	@if [ "$(INTEGRATION_SKIP_CLUSTER_CREATE)" = "true" ]; then \
+		echo "==> INTEGRATION_SKIP_CLUSTER_CREATE=true — skipping cluster creation"; \
+	else \
+		echo "==> Creating Kind cluster $(INTEGRATION_KIND_CLUSTER) (provider: $(_KIND_PROVIDER_ENV:-docker))"; \
+		$(_KIND_PROVIDER_ENV) $(KIND) create cluster \
+			--name $(INTEGRATION_KIND_CLUSTER) --wait 120s \
+			|| echo "(cluster may already exist — continuing)"; \
+	fi
+
+	@echo "==> Exporting kubeconfig → $(INTEGRATION_KUBECONFIG)"
+	$(_KIND_PROVIDER_ENV) $(KIND) export kubeconfig \
+		--name $(INTEGRATION_KIND_CLUSTER) \
+		--kubeconfig $(INTEGRATION_KUBECONFIG)
+
+	@echo "==> Loading operator image into Kind"
+	$(_KIND_PROVIDER_ENV) $(KIND) load docker-image $(IMG) \
+		--name $(INTEGRATION_KIND_CLUSTER)
+
+	@echo "==> Installing cert-manager $(CERT_MANAGER_VERSION)"
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl apply -f \
+		https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl -n cert-manager wait \
+		--for=condition=Available deployment/cert-manager-webhook --timeout=5m
+
+	@echo "==> Deploying sqlite-operator via Helm (pullPolicy=Never — uses loaded image)"
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) helm upgrade --install sqlite-operator charts/sqlite-operator \
+		--namespace sqlite-operator-system --create-namespace \
+		--set image.repository=$(REGISTRY)/$(ORG)/$(IMAGE_NAME) \
+		--set image.tag=$(VERSION) \
+		--set image.pullPolicy=Never \
+		--wait --timeout 5m
+
+	@echo ""
+	@echo "✓ Setup complete. Run 'make test-integration' to execute tests."
+
+.PHONY: test-integration
+test-integration: ## Run integration tests (requires setup to be done first)
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) \
+		go test ./test/integration/... -v -timeout 20m
+
+.PHONY: test-integration-teardown
+test-integration-teardown: ## Destroy the integration test Kind cluster
+	$(_KIND_PROVIDER_ENV) $(KIND) delete cluster \
+		--name $(INTEGRATION_KIND_CLUSTER) || true
+	@rm -f $(INTEGRATION_KUBECONFIG)
+
+.PHONY: kind-test-integration
+kind-test-integration: ## Full integration test cycle: setup → test → teardown (CI-ready)
+	$(MAKE) test-integration-setup
+	$(MAKE) test-integration \
+		|| ($(MAKE) test-integration-teardown; exit 1)
+	$(MAKE) test-integration-teardown
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -148,26 +241,70 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 .PHONY: ci-build
 ci-build: manifests generate fmt vet test docker-build ## Full CI build pipeline
 
-.PHONY: ci-deploy-manifests  
-ci-deploy-manifests: manifests kustomize ## Generate deployment manifests for CI/CD
+.PHONY: ci-deploy-manifests
+ci-deploy-manifests: manifests ## Generate release artifacts (Helm chart replaces kustomize deploy/)
 	mkdir -p release
-	cd deploy && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build deploy > release/sqlite-operator.yaml
-	$(KUSTOMIZE) build deploy/samples > release/samples.yaml
+	cp deploy/samples/sample-sqlitedb.yaml release/samples.yaml
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart
+	helm lint charts/sqlite-operator
+
+.PHONY: helm-package
+helm-package: ## Package the Helm chart into release/
+	mkdir -p release
+	helm package charts/sqlite-operator \
+		--version $(VERSION:v%=%) \
+		--app-version $(VERSION:v%=%) \
+		--destination release/
+
+.PHONY: helm-push
+helm-push: ## Push the Helm chart OCI artifact to the registry (requires helm registry login)
+	helm push release/sqlite-operator-$(VERSION:v%=%).tgz oci://$(REGISTRY)/$(ORG)
+	@echo "Chart available at: oci://$(REGISTRY)/$(ORG)/sqlite-operator"
+
+.PHONY: helm-template
+helm-template: ## Render the Helm chart with default values (dry-run)
+	helm template sqlite-operator charts/sqlite-operator \
+		--namespace sqlite-operator-system \
+		--set image.tag=$(VERSION)
 
 .PHONY: release-prepare
-release-prepare: version ci-deploy-manifests ## Prepare files for release
+release-prepare: version ci-deploy-manifests helm-package ## Prepare files for release
 	@echo "Prepared release $(VERSION) with image $(IMG)"
 	@echo "Release files:"
 	@ls -la release/
+
+# CHART_VER strips the leading 'v' for Chart.yaml (semver doesn't include it).
+CHART_VER := $(VERSION:v%=%)
+
+.PHONY: chart-version-sync
+chart-version-sync: ## Sync charts/sqlite-operator/Chart.yaml version and appVersion from Makefile.versions
+	@echo "Syncing Chart.yaml to version $(CHART_VER)"
+	@sed -i.bak \
+		-e 's/^version:.*/version: $(CHART_VER)/' \
+		-e 's/^appVersion:.*/appVersion: "$(CHART_VER)"/' \
+		charts/sqlite-operator/Chart.yaml
+	@rm -f charts/sqlite-operator/Chart.yaml.bak
+
+.PHONY: tag
+tag: chart-version-sync ## Commit version bump + Chart.yaml, create and push git tag (run after version-bump-*)
+	@echo "Tagging release $(VERSION)"
+	git add Makefile.versions charts/sqlite-operator/Chart.yaml
+	git commit -m "chore: release $(VERSION)"
+	git tag $(VERSION) -m "Release $(VERSION)"
+	git push origin HEAD
+	git push origin $(VERSION)
+	@echo ""
+	@echo "✓ Tag $(VERSION) pushed — CI will build and publish the release"
 
 .PHONY: docker-build-multiarch
 docker-build-multiarch: ## Build multi-architecture Docker image
 	$(CONTAINER_TOOL) buildx build --platform=linux/amd64,linux/arm64 --push -t ${IMG} .
 
 .PHONY: update-deploy-image
-update-deploy-image: ## Update image in deploy kustomization
-	cd deploy && $(KUSTOMIZE) edit set image controller=${IMG}
+update-deploy-image: ## Update image tag in Helm chart values
+	sed -i.bak 's|^  tag:.*|  tag: "$(VERSION)"|' charts/sqlite-operator/values.yaml && rm -f charts/sqlite-operator/values.yaml.bak
 
 ##@ Deployment
 
@@ -214,7 +351,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.18.0
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-GOLANGCI_LINT_VERSION ?= v2.1.0
+GOLANGCI_LINT_VERSION ?= v2.12.2
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.

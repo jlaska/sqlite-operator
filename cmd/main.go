@@ -37,9 +37,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 	"github.com/jlaska/sqlite-operator/internal/controller"
+	sqlitewebhook "github.com/jlaska/sqlite-operator/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -130,6 +132,13 @@ func main() {
 		})
 	}
 
+	// webhooksEnabled is true when a cert path is provided. Without a cert the
+	// webhook server cannot serve TLS, so we skip registration entirely.
+	// Production installs use the Helm chart which provisions the cert via
+	// cert-manager and passes --webhook-cert-path automatically.
+	// make deploy (kustomize development path) runs without webhooks.
+	webhooksEnabled := len(webhookCertPath) > 0
+
 	webhookServer := webhook.NewServer(webhook.Options{
 		TLSOpts: webhookTLSOpts,
 	})
@@ -182,7 +191,7 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
+		WebhookServer:          webhookServer, // only used when webhooksEnabled
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "dc63c944.example.com",
@@ -204,11 +213,38 @@ func main() {
 	}
 
 	if err := (&controller.SQLiteDBReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("sqlitedb-controller"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SQLiteDB")
 		os.Exit(1)
+	}
+
+	if err := (&controller.SQLiteRestoreReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("sqliterestore-controller"), //nolint:staticcheck
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SQLiteRestore")
+		os.Exit(1)
+	}
+
+	if webhooksEnabled {
+		if err := (&sqlitewebhook.SQLiteDBValidator{}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SQLiteDB")
+			os.Exit(1)
+		}
+
+		mgr.GetWebhookServer().Register("/mutate-core-v1-pod", &webhook.Admission{
+			Handler: &sqlitewebhook.SidecarInjector{
+				Client:  mgr.GetClient(),
+				Decoder: admission.NewDecoder(mgr.GetScheme()),
+			},
+		})
+		setupLog.Info("Webhooks enabled", "certPath", webhookCertPath)
+	} else {
+		setupLog.Info("Webhooks disabled: --webhook-cert-path not set; use Helm chart for production webhook support")
 	}
 	// +kubebuilder:scaffold:builder
 

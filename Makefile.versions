@@ -5,7 +5,7 @@
 VERSION ?= v0.1.0
 
 # Container image settings
-REGISTRY ?= quay.io
+REGISTRY ?= ghcr.io
 ORG ?= jlaska
 IMAGE_NAME ?= sqlite-operator
 IMG ?= $(REGISTRY)/$(ORG)/$(IMAGE_NAME):$(VERSION)

@@ -4,31 +4,27 @@ metadata:
   name: example-sqlite
   namespace: default
 spec:
-  databaseName: "myapp"
-  storage:
-    size: "1Gi"
-  replicas: 1
+  databaseName: myapp.db
+  databasePath: /data
+  targetDeployment: myapp       # name of the existing Deployment to inject into
+  image: litestream/litestream:0.3.13
+  backup:
+    enabled: true
+    schedule: "0 */6 * * *"    # snapshot every 6 hours
+    destination:
+      s3:
+        endpoint: minio.homelab:9000   # remove for AWS S3
+        bucket: sqlite-backups
+        path: myapp/
+        secretRef: myapp-s3-creds      # Secret with access-key-id / secret-access-key
+    retention:
+      count: 10
+  # Optional: seed the database schema on first use.
+  # Applied exactly once per unique content hash; safe to update as you add tables.
   initSQL: |
-    CREATE TABLE users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
-      email TEXT NOT NULL UNIQUE,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS users (
+      id    INTEGER PRIMARY KEY AUTOINCREMENT,
+      name  TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE
     );
-    
-    CREATE TABLE posts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      title TEXT NOT NULL,
-      content TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users (id)
-    );
-    
-    INSERT INTO users (username, email) VALUES 
-      ('admin', 'admin@example.com'),
-      ('demo', 'demo@example.com');
-      
-    INSERT INTO posts (user_id, title, content) VALUES 
-      (1, 'Welcome', 'Welcome to our SQLite database!'),
-      (2, 'Getting Started', 'This is a sample post.');
+  # initImage: keinos/sqlite3:latest  # override if needed

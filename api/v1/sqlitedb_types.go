@@ -20,62 +20,171 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// S3Destination defines an S3-compatible backup destination.
+type S3Destination struct {
+	// Endpoint is the S3-compatible endpoint URL (e.g. "minio.homelab:9000").
+	// Leave empty for AWS S3.
+	Endpoint string `json:"endpoint,omitempty"`
 
-// StorageSpec defines the storage configuration for SQLiteDB
-type StorageSpec struct {
-	// Size is the requested storage size for the database
-	Size string `json:"size,omitempty"`
+	// Bucket is the name of the S3 bucket.
+	// +kubebuilder:validation:Required
+	Bucket string `json:"bucket"`
 
-	// StorageClass is the name of the storage class to use for the database
-	StorageClass string `json:"storageClass,omitempty"`
+	// Path is the key prefix within the bucket (e.g. "paperless/").
+	Path string `json:"path,omitempty"`
+
+	// SecretRef names a Secret in the same namespace containing S3 credentials.
+	// The Secret must have keys: access-key-id, secret-access-key.
+	// +kubebuilder:validation:Required
+	SecretRef string `json:"secretRef"`
+}
+
+// BackupDestination selects which backup backend to use.
+// Exactly one field must be set.
+type BackupDestination struct {
+	// S3 configures an S3-compatible backup destination.
+	S3 *S3Destination `json:"s3,omitempty"`
+}
+
+// RetentionPolicy defines how many snapshots to keep.
+type RetentionPolicy struct {
+	// Count is the number of snapshots to retain. Older snapshots are pruned.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=10
+	Count int32 `json:"count,omitempty"`
+}
+
+// BackupSpec defines the Litestream backup configuration.
+type BackupSpec struct {
+	// Enabled controls whether Litestream replication is active.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// Schedule is the cron expression for periodic snapshot uploads
+	// (e.g. "0 */6 * * *" for every 6 hours). Litestream streams WAL
+	// continuously regardless; this controls full snapshot frequency.
+	Schedule string `json:"schedule,omitempty"`
+
+	// Destination specifies where backups are stored.
+	Destination BackupDestination `json:"destination,omitempty"`
+
+	// Retention controls how many snapshots are kept.
+	Retention RetentionPolicy `json:"retention,omitempty"`
 }
 
 // SQLiteDBSpec defines the desired state of SQLiteDB.
 type SQLiteDBSpec struct {
-	// DatabaseName is the name of the SQLite database file
+	// DatabaseName is the filename of the SQLite database (e.g. "paperless.db").
+	// +kubebuilder:validation:Required
 	DatabaseName string `json:"databaseName"`
 
-	// Storage defines the storage configuration for the database
-	Storage StorageSpec `json:"storage,omitempty"`
+	// DatabasePath is the directory path inside the application container where
+	// the database file lives (e.g. "/data"). The Litestream sidecar will be
+	// configured to watch DatabasePath/DatabaseName.
+	// +kubebuilder:validation:Required
+	DatabasePath string `json:"databasePath"`
 
-	// InitSQL contains SQL statements to execute when creating the database
+	// TargetDeployment is the name of the existing Deployment in this namespace
+	// that the Litestream sidecar should be injected into.
+	// +kubebuilder:validation:Required
+	TargetDeployment string `json:"targetDeployment"`
+
+	// Image overrides the Litestream container image used for the sidecar.
+	// +kubebuilder:default="litestream/litestream:0.3.13"
+	Image string `json:"image,omitempty"`
+
+	// Backup defines the Litestream replication / backup configuration.
+	Backup BackupSpec `json:"backup,omitempty"`
+
+	// InitSQL contains one or more SQL statements to execute against the
+	// database on first use. The operator tracks a SHA-256 hash of this
+	// content; the statements are (re-)applied only when the hash changes,
+	// making updates idempotent across pod restarts.
+	// Use IF NOT EXISTS guards to make individual statements safe to re-run.
 	InitSQL string `json:"initSQL,omitempty"`
 
-	// Replicas defines the number of database replicas (for read scaling)
-	Replicas *int32 `json:"replicas,omitempty"`
-
-	// BackupEnabled enables automatic backups
-	BackupEnabled bool `json:"backupEnabled,omitempty"`
-
-	// BackupSchedule defines the backup schedule in cron format
-	BackupSchedule string `json:"backupSchedule,omitempty"`
+	// InitImage is the container image used for the init container that
+	// applies InitSQL. Must include the sqlite3 CLI.
+	// +kubebuilder:default="keinos/sqlite3:latest"
+	InitImage string `json:"initImage,omitempty"`
 }
+
+// Annotation keys placed on a Deployment's pod template by the controller.
+// Pods inherit these annotations, signalling the mutating webhook to inject
+// the Litestream sidecar.
+const (
+	// AnnotationInject signals that the Litestream sidecar should be injected.
+	AnnotationInject = "sqlite.database.example.com/inject"
+
+	// AnnotationConfig records the "namespace/name" reference to the SQLiteDB CR
+	// that configures the sidecar for a given pod.
+	AnnotationConfig = "sqlite.database.example.com/config"
+)
+
+// Condition type constants.
+const (
+	// ConditionSidecarInjected indicates the Litestream sidecar has been
+	// injected into the target Deployment's pod template.
+	ConditionSidecarInjected = "SidecarInjected"
+
+	// ConditionBackupHealthy indicates the most recent backup succeeded.
+	ConditionBackupHealthy = "BackupHealthy"
+
+	// ConditionInitSQLApplied indicates the InitSQL has been configured and
+	// the init container is ready to apply it on next pod start.
+	ConditionInitSQLApplied = "InitSQLApplied"
+
+	// ConditionReady is the top-level readiness condition.
+	ConditionReady = "Ready"
+)
+
+// Phase constants for SQLiteDBStatus.Phase.
+const (
+	PhaseConfiguring = "Configuring"
+	PhasePending     = "Pending"
+	PhaseReady       = "Ready"
+	PhaseError       = "Error"
+)
 
 // SQLiteDBStatus defines the observed state of SQLiteDB.
 type SQLiteDBStatus struct {
-	// Phase represents the current phase of the SQLite database
+	// Phase is the high-level lifecycle state: Configuring, Pending, Ready, Error.
 	Phase string `json:"phase,omitempty"`
 
-	// Ready indicates if the database is ready to accept connections
+	// Ready mirrors the Ready condition status for quick kubectl output.
 	Ready bool `json:"ready,omitempty"`
 
-	// DatabaseSize shows the current database file size
-	DatabaseSize string `json:"databaseSize,omitempty"`
+	// BackupHealthy indicates the last backup/replication check succeeded.
+	BackupHealthy bool `json:"backupHealthy,omitempty"`
 
-	// LastBackup indicates when the last backup was performed
+	// LastBackup is the timestamp of the most recent successful backup.
 	LastBackup *metav1.Time `json:"lastBackup,omitempty"`
 
-	// PodName is the name of the pod running the SQLite database
-	PodName string `json:"podName,omitempty"`
+	// ReplicationLag is the approximate lag reported by Litestream (human-readable).
+	ReplicationLag string `json:"replicationLag,omitempty"`
 
-	// Conditions represent the latest available observations
+	// InitSQLHash is the SHA-256 hash of the InitSQL currently configured in
+	// the spec. The init container uses this to name its marker file, so a
+	// hash change triggers re-application on next pod rollout.
+	InitSQLHash string `json:"initSQLHash,omitempty"`
+
+	// ObservedGeneration is the .metadata.generation this status was computed from.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions holds standard Kubernetes condition entries.
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Target",type=string,JSONPath=".spec.targetDeployment"
+// +kubebuilder:printcolumn:name="Database",type=string,JSONPath=".spec.databaseName"
+// +kubebuilder:printcolumn:name="Backup",type=boolean,JSONPath=".spec.backup.enabled"
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=".status.ready"
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 
 // SQLiteDB is the Schema for the sqlitedbs API.
 type SQLiteDB struct {

@@ -21,64 +21,243 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 )
 
 var _ = Describe("SQLiteDB Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+	const (
+		resourceName   = "test-sqlitedb"
+		deploymentName = "test-app"
+		namespaceName  = "default"
+		databaseName   = "myapp.db"
+		databasePath   = "/data"
+		appLabel       = "app" // goconst: used as label key in test Deployment
+	)
 
-		ctx := context.Background()
+	ctx := context.Background()
+	namespacedName := types.NamespacedName{Name: resourceName, Namespace: namespaceName}
+	deploymentKey := types.NamespacedName{Name: deploymentName, Namespace: namespaceName}
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+	newReconciler := func() *SQLiteDBReconciler {
+		return &SQLiteDBReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: record.NewFakeRecorder(10),
 		}
-		sqlitedb := &databasev1.SQLiteDB{}
+	}
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind SQLiteDB")
-			err := k8sClient.Get(ctx, typeNamespacedName, sqlitedb)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &databasev1.SQLiteDB{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
+	BeforeEach(func() {
+		dep := &appsv1.Deployment{}
+		err := k8sClient.Get(ctx, deploymentKey, dep)
+		if err != nil && errors.IsNotFound(err) {
+			dep = &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: namespaceName},
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{appLabel: deploymentName},
 					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: deploymentName}},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+						},
+					},
+				},
 			}
-		})
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+		}
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &databasev1.SQLiteDB{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+		db := &databasev1.SQLiteDB{}
+		err = k8sClient.Get(ctx, namespacedName, db)
+		if err != nil && errors.IsNotFound(err) {
+			db = &databasev1.SQLiteDB{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespaceName},
+				Spec: databasev1.SQLiteDBSpec{
+					DatabaseName:     databaseName,
+					DatabasePath:     databasePath,
+					TargetDeployment: deploymentName,
+					Backup:           databasev1.BackupSpec{Enabled: false},
+				},
+			}
+			Expect(k8sClient.Create(ctx, db)).To(Succeed())
+		}
+	})
+
+	AfterEach(func() {
+		db := &databasev1.SQLiteDB{}
+		err := k8sClient.Get(ctx, namespacedName, db)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
+
+		dep := &appsv1.Deployment{}
+		err = k8sClient.Get(ctx, deploymentKey, dep)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Delete(ctx, dep)).To(Succeed())
+	})
+
+	It("should reconcile without error", func() {
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("should create the Litestream ConfigMap", func() {
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      resourceName + "-litestream",
+			Namespace: namespaceName,
+		}, cm)).To(Succeed())
+		Expect(cm.Data).To(HaveKey("litestream.yml"))
+		Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+	})
+
+	It("should annotate the target Deployment's pod template", func() {
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(injectAnnotation, "true"))
+		Expect(dep.Spec.Template.Annotations).To(HaveKey(configAnnotation))
+		// Label mirrors annotation so the webhook objectSelector fires.
+		Expect(dep.Spec.Template.Labels).To(HaveKeyWithValue(injectAnnotation, "true"))
+	})
+
+	It("should set SidecarInjected condition after annotation", func() {
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		db := &databasev1.SQLiteDB{}
+		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+		cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionSidecarInjected)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("should set BackupHealthy condition to False when backup is disabled", func() {
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		db := &databasev1.SQLiteDB{}
+		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+		cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionBackupHealthy)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("BackupDisabled"))
+	})
+
+	It("should set BackupHealthy to False when no Litestream pods exist yet", func() {
+		// Update the CR to enable backup.
+		db := &databasev1.SQLiteDB{}
+		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+		db.Spec.Backup = databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{Bucket: "test", SecretRef: "creds"},
+			},
+		}
+		Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+		cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionBackupHealthy)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		// No pods exist yet in envtest, so the reason should be SidecarUnhealthy.
+		Expect(cond.Reason).To(Equal("SidecarUnhealthy"))
+	})
+
+	It("should requeue after the status sync interval", func() {
+		result, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(statusSyncInterval))
+	})
+
+	Context("init SQL management", func() {
+		const initSQL = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
+
+		It("creates the init-sql ConfigMap when InitSQL is set", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance SQLiteDB")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-init-sql", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["init.sql"]).To(Equal(initSQL))
 		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &SQLiteDBReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+		It("records the SHA-256 hash in status.InitSQLHash", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(initSQL)))
+		})
+
+		It("updates the ConfigMap and hash when InitSQL changes", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Change the SQL.
+			newSQL := initSQL + "\nCREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY);"
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = newSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-init-sql", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["init.sql"]).To(Equal(newSQL))
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(newSQL)))
+		})
+
+		It("sets InitSQLApplied condition to True when ConfigMap is ready", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			db.Spec.InitSQL = initSQL
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionInitSQLApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("ConfigMapReady"))
 		})
 	})
 })
