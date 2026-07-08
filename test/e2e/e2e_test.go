@@ -70,18 +70,6 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
-		By("waiting for cert-manager to issue the webhook TLS certificate")
-		// The operator pod mounts the webhook cert Secret as a volume; the pod will
-		// stay in ContainerCreating until cert-manager creates the Secret. We wait
-		// here so the subsequent Eventually(controller pod Running) check starts
-		// from a sensible baseline rather than racing against cert issuance.
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "secret",
-				"sqlite-operator-webhook-server-cert",
-				"-n", namespace)
-			_, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
