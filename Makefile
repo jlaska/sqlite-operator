@@ -110,6 +110,7 @@ INTEGRATION_KIND_CLUSTER     ?= sqlite-operator-integration
 INTEGRATION_KUBECONFIG       ?= /tmp/sqlite-integration-kubeconfig
 INTEGRATION_SKIP_CLUSTER_CREATE ?= false
 CERT_MANAGER_VERSION         ?= v1.16.3
+OPERATOR_NAMESPACE           ?= sqlite-operator-system
 
 # Detect whether to use the Podman provider for Kind.
 # Covers: explicit CONTAINER_TOOL=podman, and the common macOS case where the
@@ -155,7 +156,7 @@ test-integration-setup: docker-build ## Create Kind cluster (with Podman support
 
 	@echo "==> Deploying sqlite-operator via Helm (pullPolicy=Never — uses loaded image)"
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) helm upgrade --install sqlite-operator charts/sqlite-operator \
-		--namespace sqlite-operator-system --create-namespace \
+		--namespace $(OPERATOR_NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(ORG)/$(IMAGE_NAME) \
 		--set image.tag=$(VERSION) \
 		--set image.pullPolicy=Never \
@@ -168,6 +169,18 @@ test-integration-setup: docker-build ## Create Kind cluster (with Podman support
 test-integration: ## Run integration tests (requires setup to be done first)
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) \
 		go test ./test/integration/... -v -timeout 20m
+
+.PHONY: test-integration-redeploy
+test-integration-redeploy: docker-build ## Rebuild image, reload into existing cluster, restart operator, then run tests.
+	@echo "==> Loading updated image into Kind cluster $(INTEGRATION_KIND_CLUSTER)"
+	$(_KIND_PROVIDER_ENV) $(KIND) load docker-image $(IMG) \
+		--name $(INTEGRATION_KIND_CLUSTER)
+	@echo "==> Restarting operator"
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl rollout restart \
+		deployment/sqlite-operator-controller-manager -n $(OPERATOR_NAMESPACE)
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl rollout status \
+		deployment/sqlite-operator-controller-manager -n $(OPERATOR_NAMESPACE) --timeout=2m
+	$(MAKE) test-integration
 
 .PHONY: test-integration-teardown
 test-integration-teardown: ## Destroy the integration test Kind cluster
@@ -286,7 +299,7 @@ helm-push: ## Push the Helm chart OCI artifact to the registry (requires helm re
 .PHONY: helm-template
 helm-template: ## Render the Helm chart with default values (dry-run)
 	helm template sqlite-operator charts/sqlite-operator \
-		--namespace sqlite-operator-system \
+		--namespace $(OPERATOR_NAMESPACE) \
 		--set image.tag=$(VERSION)
 
 .PHONY: release-prepare
