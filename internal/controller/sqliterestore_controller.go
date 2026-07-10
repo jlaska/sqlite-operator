@@ -112,16 +112,23 @@ func (r *SQLiteRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 func (r *SQLiteRestoreReconciler) reconcilePending(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// Record original replica count. If the Deployment is already gone (e.g. the
+	// app was torn down before the restore), treat it as already at 0 — the
+	// scale-down step will be skipped and the restore Job runs immediately.
+	originalReplicas := int32(0)
 	deployment, err := r.getTargetDeployment(ctx, sourceDB)
-	if err != nil {
+	switch {
+	case err == nil:
+		if deployment.Spec.Replicas != nil {
+			originalReplicas = *deployment.Spec.Replicas
+		} else {
+			originalReplicas = 1 // Kubernetes default
+		}
+	case errors.IsNotFound(err):
+		log.Info("target Deployment not found; scale-down will be skipped")
+	default:
 		return ctrl.Result{}, r.failRestore(ctx, restore,
-			fmt.Sprintf("cannot find target Deployment for SQLiteDB %q: %v", sourceDB.Name, err))
-	}
-
-	// Record original replica count so we can restore it later.
-	originalReplicas := int32(1)
-	if deployment.Spec.Replicas != nil {
-		originalReplicas = *deployment.Spec.Replicas
+			fmt.Sprintf("getting target Deployment for SQLiteDB %q: %v", sourceDB.Name, err))
 	}
 
 	if err := r.pauseReplication(ctx, sourceDB); err != nil {
@@ -166,20 +173,22 @@ func (r *SQLiteRestoreReconciler) reconcilePausing(ctx context.Context, restore 
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 	}
 
-	// Scale Deployment to 0.
+	// Scale Deployment to 0. If it no longer exists, treat it as already scaled down.
 	deployment, err := r.getTargetDeployment(ctx, sourceDB)
-	if err != nil {
+	if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, r.failRestore(ctx, restore,
 			fmt.Sprintf("cannot find target Deployment: %v", err))
 	}
-
-	if err := r.scaleDeployment(ctx, deployment, 0); err != nil {
-		return ctrl.Result{}, fmt.Errorf("scaling Deployment to 0: %w", err)
+	if err == nil {
+		if scaleErr := r.scaleDeployment(ctx, deployment, 0); scaleErr != nil {
+			return ctrl.Result{}, fmt.Errorf("scaling Deployment to 0: %w", scaleErr)
+		}
+		log.Info("Scaled Deployment to 0, waiting for pods to terminate")
+		r.Recorder.Eventf(restore, corev1.EventTypeNormal, "ScalingDown",
+			"Scaled Deployment %s to 0 replicas", deployment.Name)
+	} else {
+		log.Info("target Deployment not found during Pausing; proceeding without scale-down")
 	}
-
-	log.Info("Scaled Deployment to 0, waiting for pods to terminate")
-	r.Recorder.Eventf(restore, corev1.EventTypeNormal, "ScalingDown",
-		"Scaled Deployment %s to 0 replicas", deployment.Name)
 
 	return ctrl.Result{RequeueAfter: restoreRequeueInterval}, r.setStatus(ctx, restore,
 		databasev1.RestorePhaseScalingDown, restore.Status.JobName, "waiting for pods to terminate",
@@ -187,16 +196,17 @@ func (r *SQLiteRestoreReconciler) reconcilePausing(ctx context.Context, restore 
 }
 
 // reconcileScalingDown polls until all pods have terminated, then creates the restore Job.
+// If the Deployment no longer exists, treat it as already at 0 replicas.
 func (r *SQLiteRestoreReconciler) reconcileScalingDown(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	deployment, err := r.getTargetDeployment(ctx, sourceDB)
-	if err != nil {
+	if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, r.failRestore(ctx, restore,
 			fmt.Sprintf("cannot find target Deployment: %v", err))
 	}
 
-	if deployment.Status.Replicas > 0 {
+	if err == nil && deployment.Status.Replicas > 0 {
 		log.Info("Waiting for Deployment pods to terminate", "currentReplicas", deployment.Status.Replicas)
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 	}
@@ -266,19 +276,20 @@ func (r *SQLiteRestoreReconciler) reconcileRunning(ctx context.Context, restore 
 func (r *SQLiteRestoreReconciler) reconcileScalingUp(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	deployment, err := r.getTargetDeployment(ctx, sourceDB)
-	if err != nil {
-		// Deployment may have been deleted; still complete the restore and remove the pause.
-		log.Error(err, "Cannot find target Deployment during scale-up; removing pause anyway")
-	} else {
-		target := int32(1)
-		if restore.Status.OriginalReplicas != nil {
-			target = *restore.Status.OriginalReplicas
+	target := int32(1)
+	if restore.Status.OriginalReplicas != nil {
+		target = *restore.Status.OriginalReplicas
+	}
+	if target > 0 {
+		deployment, err := r.getTargetDeployment(ctx, sourceDB)
+		if err != nil && !errors.IsNotFound(err) {
+			log.Error(err, "Cannot find target Deployment during scale-up; removing pause anyway")
+		} else if err == nil {
+			if scaleErr := r.scaleDeployment(ctx, deployment, target); scaleErr != nil {
+				return ctrl.Result{}, fmt.Errorf("scaling Deployment back to %d: %w", target, scaleErr)
+			}
+			log.Info("Scaled Deployment back up", "replicas", target)
 		}
-		if err := r.scaleDeployment(ctx, deployment, target); err != nil {
-			return ctrl.Result{}, fmt.Errorf("scaling Deployment back to %d: %w", target, err)
-		}
-		log.Info("Scaled Deployment back up", "replicas", target)
 	}
 
 	if err := r.resumeReplication(ctx, sourceDB); err != nil {
@@ -299,13 +310,13 @@ func (r *SQLiteRestoreReconciler) reconcileScalingUp(ctx context.Context, restor
 func (r *SQLiteRestoreReconciler) failRestoreWithCleanup(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB, msg string) error {
 	log := logf.FromContext(ctx)
 
-	// Best-effort cleanup: scale back up if still at 0.
-	if deployment, err := r.getTargetDeployment(ctx, sourceDB); err == nil {
-		if deployment.Status.Replicas == 0 {
-			target := int32(1)
-			if restore.Status.OriginalReplicas != nil {
-				target = *restore.Status.OriginalReplicas
-			}
+	// Best-effort cleanup: scale back up if still at 0 and the Deployment exists.
+	if deployment, err := r.getTargetDeployment(ctx, sourceDB); err == nil && deployment.Status.Replicas == 0 {
+		target := int32(1)
+		if restore.Status.OriginalReplicas != nil {
+			target = *restore.Status.OriginalReplicas
+		}
+		if target > 0 {
 			if scaleErr := r.scaleDeployment(ctx, deployment, target); scaleErr != nil {
 				log.Error(scaleErr, "Failed to scale Deployment back up during cleanup")
 			}

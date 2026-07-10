@@ -838,8 +838,10 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		Expect(*restore.Status.OriginalReplicas).To(Equal(int32(1)))
 	})
 
-	It("fails when SQLiteDB's targetDeployment does not exist", func() {
-		// Create a SQLiteDB pointing to a nonexistent Deployment.
+	It("proceeds gracefully when SQLiteDB's targetDeployment does not exist", func() {
+		// A missing Deployment is a valid case: the app may have been torn down
+		// before the restore was requested. The controller skips scale-down and
+		// proceeds to create the restore Job with originalReplicas=0.
 		dbName := "sm-db-missing-dep"
 		restoreName := "sm-restore-missing-dep"
 
@@ -860,6 +862,14 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		Expect(k8sClient.Create(ctx, db)).To(Succeed())
 		defer func() { _ = k8sClient.Delete(ctx, db) }()
 
+		// Create the ConfigMap that Pausing phase checks.
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: dbName + "-litestream", Namespace: namespaceName},
+			Data:       map[string]string{"litestream.yml": "dbs: []\n"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, cm) }()
+
 		restore := &databasev1.SQLiteRestore{
 			ObjectMeta: metav1.ObjectMeta{Name: restoreName, Namespace: namespaceName},
 			Spec: databasev1.SQLiteRestoreSpec{
@@ -869,16 +879,49 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, restore)).To(Succeed())
-		defer func() { _ = k8sClient.Delete(ctx, restore) }()
+		defer func() {
+			_ = k8sClient.Delete(ctx, restore)
+			job := &batchv1.Job{}
+			_ = k8sClient.Delete(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name: restoreName + "-restore", Namespace: namespaceName,
+			}})
+			_ = job.Name // suppress unused variable
+		}()
 
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{
+		reconciler := newReconciler()
+
+		// Pending → Pausing (deployment not found → originalReplicas=0)
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: restoreName, Namespace: namespaceName},
 		})
 		Expect(err).NotTo(HaveOccurred())
-
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: restoreName, Namespace: namespaceName}, restore)).To(Succeed())
-		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseFailed))
-		Expect(restore.Status.Message).To(ContainSubstring("nonexistent-deployment"))
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhasePausing))
+		Expect(restore.Status.OriginalReplicas).NotTo(BeNil())
+		Expect(*restore.Status.OriginalReplicas).To(Equal(int32(0)))
+
+		// Pausing → ScalingDown (deployment not found → skip scale, go straight to ScalingDown)
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: restoreName, Namespace: namespaceName},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: restoreName, Namespace: namespaceName}, restore)).To(Succeed())
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseScalingDown))
+
+		// ScalingDown → Running (deployment not found → treat as replicas=0, create Job)
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: restoreName, Namespace: namespaceName},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: restoreName, Namespace: namespaceName}, restore)).To(Succeed())
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseRunning))
+
+		// Job should exist.
+		job := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: restoreName + "-restore", Namespace: namespaceName,
+		}, job)).To(Succeed())
+		_ = k8sClient.Delete(ctx, job)
 	})
 })
 

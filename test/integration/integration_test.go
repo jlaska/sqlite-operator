@@ -384,8 +384,10 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 
 		By("scaling Deployment to 0 and back to 1 to force pod restart")
 		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=0")
-		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
-			"--for=jsonpath={.status.replicas}=0", "--timeout=2m")
+		// kubectl rollout status correctly handles scale-to-0 completion.
+		// --for=jsonpath={.status.replicas}=0 is unreliable: Kubernetes omits
+		// the field when it reaches zero, so the jsonpath never matches.
+		kubectl("rollout", "status", "deployment/"+appName, "-n", testNamespace, "--timeout=2m")
 		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=1")
 
 		By("waiting for archive-check init container to fail (pod blocked)")
@@ -609,14 +611,19 @@ func runningPod(deploymentName string) string {
 }
 
 // mcList runs `mc ls` against the MinIO service using a one-shot pod.
+// Returns the listing output on success, empty string on any error.
 func mcList(path string) string {
 	podName := fmt.Sprintf("mc-ls-%d", time.Now().UnixMilli())
-	out, _ := runCmd("kubectl", "run", podName,
+	// --command overrides the mc image's entrypoint so /bin/sh is the process,
+	// not an arg passed to mc. Without it kubectl run appends /bin/sh as an
+	// argument to mc, producing: mc /bin/sh -c "..." which fails.
+	out, err := runCmd("kubectl", "run", podName,
 		"--restart=Never",
 		"--rm",
 		"--attach",
 		"-n", testNamespace,
 		"--image=quay.io/minio/mc:latest",
+		"--command",
 		"--",
 		"/bin/sh", "-c",
 		fmt.Sprintf(
@@ -624,5 +631,8 @@ func mcList(path string) string {
 			minioUser, minioPass, path,
 		),
 	)
+	if err != nil {
+		return ""
+	}
 	return out
 }
