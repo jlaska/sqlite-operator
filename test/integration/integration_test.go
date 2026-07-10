@@ -210,14 +210,21 @@ var _ = Describe("Integration", Ordered, func() {
 				phase, err := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
 					"-o", "jsonpath={.status.phase}")
 				g.Expect(err).NotTo(HaveOccurred())
-				if phase == "Failed" {
-					// Print job pod logs to help debug.
+				if phase == "Failed" || phase == "Running" {
 					jobName, _ := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
 						"-o", "jsonpath={.status.jobName}")
 					if jobName != "" {
-						logs, _ := kubectlQ("logs", "-n", testNamespace,
-							"job/"+jobName, "--tail=50")
-						GinkgoWriter.Printf("\n=== restore Job logs ===\n%s\n========================\n", logs)
+						// Show pod status — useful when kubectl logs times out (pod pending/between retries).
+						pods, _ := kubectlQ("get", "pods", "-n", testNamespace,
+							"-l", "sqlite.database.example.com/restore="+restoreName, "-o", "wide")
+						GinkgoWriter.Printf("\n=== restore Job pods ===\n%s\n", pods)
+						// --previous gets logs from the last terminated container
+						// even when the pod is currently between retries.
+						logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--previous", "--tail=50")
+						if logs == "" {
+							logs, _ = kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50")
+						}
+						GinkgoWriter.Printf("=== restore Job logs ===\n%s\n========================\n", logs)
 					}
 				}
 				g.Expect(phase).To(Equal("Complete"))

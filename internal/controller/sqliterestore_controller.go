@@ -414,6 +414,10 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 		"restore",
 		"-config", "/etc/litestream/litestream.yml",
 		"-o", restore.Spec.TargetPath,
+		// -force allows job retries to overwrite a partial output file left by
+		// a previous failed attempt. Without it, litestream exits immediately
+		// if the output file already exists (even if incomplete).
+		"-force",
 	}
 	if restore.Spec.Timestamp != "" {
 		args = append(args, "-timestamp", restore.Spec.Timestamp)

@@ -211,24 +211,32 @@ func (s *SidecarInjector) injectArchiveCheckContainer(pod *corev1.Pod, db *datab
 
 	// Shell script logic:
 	//   1. If the DB file exists → pass (normal restart or first-time setup with pre-existing DB).
-	//   2. If DB is missing AND S3 has snapshots → fail with actionable message.
+	//   2. If DB is missing AND S3 has restorable data → fail with actionable message.
 	//   3. If DB is missing AND S3 is empty → pass (first-time setup).
+	//
+	// Uses `litestream restore` as the S3 probe instead of `litestream snapshots`
+	// because in v0.5.x `snapshots` is an IPC command that requires a running daemon;
+	// it always returns empty when invoked standalone in a one-off init container.
+	// `litestream restore` works standalone and exits 0 only when restorable data exists.
 	script := fmt.Sprintf(`
 DB_PATH="%s"
 if [ -f "${DB_PATH}" ]; then
   echo "archive-check: database file exists, skipping check"
   exit 0
 fi
-echo "archive-check: database file missing at ${DB_PATH}, checking S3..."
-SNAPSHOTS=$(litestream snapshots -config /etc/litestream/litestream.yml "${DB_PATH}" 2>/dev/null | wc -l | tr -d ' ')
-if [ "${SNAPSHOTS}" -gt 0 ] 2>/dev/null; then
-  echo "archive-check FAILED: S3 has ${SNAPSHOTS} snapshot(s) but local database is missing."
+echo "archive-check: database file missing at ${DB_PATH}, probing S3 for backup data..."
+PROBE="${DB_PATH}.archive-check-probe"
+rm -f "${PROBE}"
+if litestream restore -config /etc/litestream/litestream.yml -o "${PROBE}" "${DB_PATH}" 2>/dev/null; then
+  rm -f "${PROBE}"
+  echo "archive-check FAILED: S3 has existing backup data but local database is missing."
   echo "This likely means data was lost (PVC wiped or DB deleted)."
   echo "To recover: create a SQLiteRestore CR targeting this PVC."
   echo "To bypass (start fresh): set annotation sqlite.database.example.com/skip-archive-check=true"
   exit 1
 fi
-echo "archive-check: no S3 snapshots found, safe to proceed (first-time setup)"
+rm -f "${PROBE}"
+echo "archive-check: no S3 backup found, safe to proceed (first-time setup)"
 exit 0
 `, dbFullPath)
 

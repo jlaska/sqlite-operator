@@ -185,6 +185,15 @@ test-integration-redeploy: docker-build ## Rebuild image, reload into existing c
 	@echo "==> Loading updated image into Kind cluster $(INTEGRATION_KIND_CLUSTER)"
 	$(_KIND_PROVIDER_ENV) $(KIND) load docker-image $(IMG) \
 		--name $(INTEGRATION_KIND_CLUSTER)
+	@echo "==> Pre-loading test images into Kind (avoids slow pulls and backoff failures)"
+	@for img in \
+	  litestream/litestream:0.5.14 \
+	  keinos/sqlite3:latest \
+	  quay.io/minio/mc:latest; do \
+	    echo "    $$img"; \
+	    $(CONTAINER_TOOL) pull $$img 2>/dev/null || true; \
+	    $(_KIND_PROVIDER_ENV) $(KIND) load docker-image $$img --name $(INTEGRATION_KIND_CLUSTER); \
+	done
 	@echo "==> Restarting operator"
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl rollout restart \
 		deployment/sqlite-operator -n $(OPERATOR_NAMESPACE)
