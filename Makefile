@@ -148,6 +148,16 @@ test-integration-setup: docker-build ## Create Kind cluster (with Podman support
 	$(_KIND_PROVIDER_ENV) $(KIND) load docker-image $(IMG) \
 		--name $(INTEGRATION_KIND_CLUSTER)
 
+	@echo "==> Pre-loading test images into Kind (avoids slow/failed pulls during tests)"
+	@for img in \
+	  litestream/litestream:0.5.14 \
+	  keinos/sqlite3:latest \
+	  quay.io/minio/mc:latest; do \
+	    echo "    pulling $$img"; \
+	    $(CONTAINER_TOOL) pull $$img; \
+	    $(_KIND_PROVIDER_ENV) $(KIND) load docker-image $$img --name $(INTEGRATION_KIND_CLUSTER); \
+	done
+
 	@echo "==> Installing cert-manager $(CERT_MANAGER_VERSION)"
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl apply -f \
 		https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml

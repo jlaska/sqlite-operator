@@ -627,7 +627,7 @@ func mcList(path string) string {
 		"--",
 		"/bin/sh", "-c",
 		fmt.Sprintf(
-			"mc alias set local http://minio:9000 %s %s --quiet && mc ls local/%s 2>/dev/null",
+			"mc alias set local http://minio:9000 %s %s > /dev/null 2>&1 && mc ls local/%s 2>/dev/null",
 			minioUser, minioPass, path,
 		),
 	)
