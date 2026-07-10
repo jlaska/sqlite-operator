@@ -239,7 +239,7 @@ var _ = Describe("Integration", Ordered, func() {
 
 // ── Scenario: Manual Replication Pause ───────────────────────────────────────
 
-var _ = Describe("Replication Pause", func() {
+var _ = Describe("Replication Pause", Ordered, func() {
 	const (
 		appName = "pause-test-app"
 		dbName  = "pause-test-db"
@@ -328,7 +328,7 @@ var _ = Describe("Replication Pause", func() {
 
 // ── Scenario: Archive Check — Data Loss Recovery ──────────────────────────────
 
-var _ = Describe("Archive Check — Data Loss Recovery", func() {
+var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 	const (
 		appName   = "archive-check-app"
 		dbName    = "archive-check-db"
