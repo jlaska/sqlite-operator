@@ -2,7 +2,9 @@ name: Tests
 
 on:
   push:
+    branches-ignore: [ main, develop ]
   pull_request:
+    branches: [ main ]
 
 jobs:
   test:
@@ -10,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 

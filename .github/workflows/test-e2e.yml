@@ -2,7 +2,11 @@ name: E2E Tests
 
 on:
   push:
+    branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   test-e2e:
@@ -10,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
