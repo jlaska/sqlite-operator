@@ -37,9 +37,15 @@ var (
 	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
 	isCertManagerAlreadyInstalled = false
 
-	// projectImage is the name of the image which will be build and loaded
-	// with the code source changes to be tested.
-	projectImage = "example.com/sqlite-operator:v0.0.1"
+	// projectImage is the operator image to build and load into Kind.
+	// Reads IMG from the environment so 'make test-e2e' passes the same image
+	// that was built by docker-build. Falls back to the canonical release image.
+	projectImage = func() string {
+		if img := os.Getenv("IMG"); img != "" {
+			return img
+		}
+		return "ghcr.io/jlaska/sqlite-operator:v0.3.3"
+	}()
 )
 
 // TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
