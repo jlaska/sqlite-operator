@@ -177,9 +177,9 @@ test-integration-redeploy: docker-build ## Rebuild image, reload into existing c
 		--name $(INTEGRATION_KIND_CLUSTER)
 	@echo "==> Restarting operator"
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl rollout restart \
-		deployment/sqlite-operator-controller-manager -n $(OPERATOR_NAMESPACE)
+		deployment/sqlite-operator -n $(OPERATOR_NAMESPACE)
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl rollout status \
-		deployment/sqlite-operator-controller-manager -n $(OPERATOR_NAMESPACE) --timeout=2m
+		deployment/sqlite-operator -n $(OPERATOR_NAMESPACE) --timeout=2m
 	$(MAKE) test-integration
 
 .PHONY: test-integration-teardown
