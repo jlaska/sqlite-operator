@@ -213,6 +213,15 @@ bin/manager: go.mod go.sum $(MANAGER_SOURCES) | $(LOCALBIN)
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
+.PHONY: clean
+clean: ## Remove build artifacts: manager binary, coverage report, and release packages.
+	rm -f bin/manager cover.out
+	rm -rf release/ dist/
+
+.PHONY: clean-tools
+clean-tools: ## Remove downloaded tool binaries (controller-gen, kustomize, setup-envtest, golangci-lint).
+	rm -rf bin/
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
