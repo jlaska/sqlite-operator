@@ -62,8 +62,9 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e | grep -v /integration) -coverprofile cover.out
+test: manifests generate setup-envtest ## Run tests. (go test runs go vet internally; use 'make fmt vet' to check style.)
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+	  go test ./internal/... -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -195,9 +196,18 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 ##@ Build
 
+# Source files that trigger a manager rebuild. Make compares bin/manager's
+# mtime against these; if nothing changed, 'make build' is a no-op.
+MANAGER_SOURCES := $(wildcard cmd/*.go) \
+                   $(wildcard api/v1/*.go) \
+                   $(wildcard internal/controller/*.go) \
+                   $(wildcard internal/webhook/*.go)
+
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+build: bin/manager ## Build manager binary (idempotent — skips rebuild when sources are unchanged).
+
+bin/manager: go.mod go.sum $(MANAGER_SOURCES) | $(LOCALBIN)
+	go build -o bin/manager ./cmd/main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
