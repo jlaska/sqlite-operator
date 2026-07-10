@@ -237,6 +237,226 @@ var _ = Describe("Integration", Ordered, func() {
 
 }) // end Integration Ordered
 
+// ── Scenario: Manual Replication Pause ───────────────────────────────────────
+
+var _ = Describe("Replication Pause", func() {
+	const (
+		appName = "pause-test-app"
+		dbName  = "pause-test-db"
+		pvcName = "pause-test-pvc"
+		dbFile  = "pause.db"
+		dbPath  = "/data"
+	)
+
+	BeforeAll(func() {
+		By("creating PVC, Deployment, and SQLiteDB CR with backup enabled")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=condition=Available", "--timeout=3m")
+		applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, true, ""))
+
+		By("waiting for sidecar injection and BackupHealthy=True")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+	})
+
+	AfterAll(func() {
+		// Ensure pause annotation is removed even if test fails mid-way.
+		runIgnoreError("kubectl", "annotate", "sqlitedb", dbName, "-n", testNamespace,
+			"sqlite.database.example.com/pause-", "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
+	})
+
+	It("pauses replication when annotation is set and resumes when removed", func() {
+		By("setting pause annotation on SQLiteDB")
+		kubectl("annotate", "sqlitedb", dbName, "-n", testNamespace,
+			"sqlite.database.example.com/pause=true", "--overwrite")
+
+		By("waiting for ConfigMap to reflect pause (dbs: [])")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "configmap", dbName+"-litestream", "-n", testNamespace,
+				"-o", `jsonpath={.data.litestream\.yml}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("dbs: []\n"))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying ReplicationPaused condition is True")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="ReplicationPaused")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}).Should(Succeed())
+
+		By("verifying phase is Paused")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("Paused"))
+		}).Should(Succeed())
+
+		By("removing pause annotation")
+		kubectl("annotate", "sqlitedb", dbName, "-n", testNamespace,
+			"sqlite.database.example.com/pause-")
+
+		By("waiting for ConfigMap to restore normal config")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "configmap", dbName+"-litestream", "-n", testNamespace,
+				"-o", `jsonpath={.data.litestream\.yml}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring("dbs:"))
+			g.Expect(out).NotTo(Equal("dbs: []\n"))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying phase returns to Ready")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("Ready"))
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+	})
+})
+
+// ── Scenario: Archive Check — Data Loss Recovery ──────────────────────────────
+
+var _ = Describe("Archive Check — Data Loss Recovery", func() {
+	const (
+		appName   = "archive-check-app"
+		dbName    = "archive-check-db"
+		pvcName   = "archive-check-pvc"
+		dbFile    = "archive.db"
+		dbPath    = "/data"
+		initSQL   = "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT);"
+		itemValue = "archive-check-test-item"
+	)
+
+	BeforeAll(func() {
+		By("creating PVC, Deployment, and SQLiteDB CR with backup enabled and initSQL")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=condition=Available", "--timeout=3m")
+		applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+
+		By("waiting for sidecar injection and BackupHealthy=True")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("writing test data to the database")
+		podName := runningPod(appName)
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", dbPath+"/"+dbFile,
+			"INSERT INTO items(name) VALUES('"+itemValue+"');")
+
+		By("waiting for Litestream to replicate the row to MinIO")
+		Eventually(func(g Gomega) {
+			out := mcList(minioBucket + "/" + dbName + "/")
+			g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+	})
+
+	AfterAll(func() {
+		runIgnoreError("kubectl", "delete", "sqliterestore", "archive-check-restore", "-n", testNamespace, "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
+	})
+
+	It("archive-check blocks pod startup when DB is missing and S3 has data", func() {
+		podName := runningPod(appName)
+
+		By("deleting the database file from the PVC (simulating data loss)")
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "rm", "-f", dbPath+"/"+dbFile)
+
+		By("scaling Deployment to 0 and back to 1 to force pod restart")
+		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=0")
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=jsonpath={.status.replicas}=0", "--timeout=2m")
+		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=1")
+
+		By("waiting for archive-check init container to fail (pod blocked)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"-o", `jsonpath={range .items[*]}{range .status.initContainerStatuses[*]}{.name}={.state.terminated.exitCode}{"\n"}{end}{end}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring("litestream-archive-check=1"),
+				"expected archive-check init container to exit 1")
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying ArchiveCheckFailed condition on SQLiteDB")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="ArchiveCheckFailed")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}).Should(Succeed())
+	})
+
+	It("SQLiteRestore recovers data and allows pod to restart successfully", func() {
+		By("creating a SQLiteRestore CR targeting the same PVC")
+		applyLiteral(sqliteRestoreManifest("archive-check-restore", testNamespace, dbName, pvcName, dbPath+"/"+dbFile))
+
+		By("waiting for restore to reach Complete phase")
+		Eventually(func(g Gomega) {
+			phase, err := kubectlQ("get", "sqliterestore", "archive-check-restore", "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			if phase == "Failed" {
+				jobName, _ := kubectlQ("get", "sqliterestore", "archive-check-restore", "-n", testNamespace,
+					"-o", "jsonpath={.status.jobName}")
+				if jobName != "" {
+					logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50")
+					GinkgoWriter.Printf("\n=== restore Job logs ===\n%s\n========================\n", logs)
+				}
+			}
+			g.Expect(phase).To(Equal("Complete"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("waiting for the pod to restart successfully after restore")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"--field-selector=status.phase=Running",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).NotTo(BeEmpty())
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying restored data is present in the database")
+		restoredPod := runningPod(appName)
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("exec", "-n", testNamespace, restoredPod, "-c", "app",
+				"--", "sqlite3", dbPath+"/"+dbFile,
+				"SELECT name FROM items WHERE name='"+itemValue+"';")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring(itemValue))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying BackupHealthy=True after restore (Litestream resumed)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+	})
+})
+
 // ── Manifest builders ──────────────────────────────────────────────────────
 
 func pvcManifest(name, ns string) string {

@@ -365,6 +365,429 @@ var _ = Describe("SidecarInjector init container", func() {
 	})
 })
 
+var _ = Describe("SidecarInjector archive check", func() {
+	const (
+		namespace         = "default"
+		acDBName          = "archive-check-db"
+		acDeployName      = "archive-check-app"
+		acDatabaseName    = "app.db"
+		acDatabasePath    = "/data"
+		acVolumeName      = "app-data"
+		acSecretRef       = "s3-creds"
+		injectTrue        = "true"    // goconst
+		appContainerName  = "app"     // goconst
+		appContainerImage = "busybox" // goconst
+	)
+
+	ctx := context.Background()
+
+	newInjector := func() *webhook.SidecarInjector {
+		return &webhook.SidecarInjector{
+			Client:  k8sClient,
+			Decoder: admission.NewDecoder(k8sClient.Scheme()),
+		}
+	}
+
+	newPod := func(annotations map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-pod", Namespace: namespace,
+				Annotations: annotations,
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: appContainerName, Image: appContainerImage,
+					VolumeMounts: []corev1.VolumeMount{{Name: acVolumeName, MountPath: acDatabasePath}},
+				}},
+				Volumes: []corev1.Volume{{
+					Name:         acVolumeName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+			},
+		}
+	}
+
+	makeRequest := func(pod *corev1.Pod) admission.Request {
+		raw, err := json.Marshal(pod)
+		Expect(err).NotTo(HaveOccurred())
+		return admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{
+				UID: "test-uid", Namespace: namespace,
+				Operation: admissionv1.Create,
+				Object:    runtime.RawExtension{Raw: raw},
+			},
+		}
+	}
+
+	newBackupDB := func(annotations map[string]string) *databasev1.SQLiteDB {
+		db := &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: acDBName, Namespace: namespace, Annotations: annotations},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:     acDatabaseName,
+				DatabasePath:     acDatabasePath,
+				TargetDeployment: acDeployName,
+				Backup: databasev1.BackupSpec{
+					Enabled: true,
+					Destination: databasev1.BackupDestination{
+						S3: &databasev1.S3Destination{Bucket: "test-bucket", SecretRef: acSecretRef},
+					},
+				},
+			},
+		}
+		return db
+	}
+
+	AfterEach(func() {
+		db := &databasev1.SQLiteDB{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: acDBName, Namespace: namespace}, db); err == nil {
+			_ = k8sClient.Delete(ctx, db)
+		}
+	})
+
+	It("injects archive-check init container when backup is enabled", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		initNames := make([]string, len(patched.Spec.InitContainers))
+		for i, c := range patched.Spec.InitContainers {
+			initNames[i] = c.Name
+		}
+		Expect(initNames).To(ContainElement("litestream-archive-check"))
+	})
+
+	It("archive-check init container is first (before sqlite-init)", func() {
+		db := newBackupDB(nil)
+		db.Spec.InitSQL = "CREATE TABLE t (id INTEGER PRIMARY KEY);"
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		Expect(patched.Spec.InitContainers).To(HaveLen(2))
+		Expect(patched.Spec.InitContainers[0].Name).To(Equal("litestream-archive-check"))
+		Expect(patched.Spec.InitContainers[1].Name).To(Equal("sqlite-init"))
+	})
+
+	It("archive-check init container has correct volume mounts", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+
+		mountPaths := make([]string, len(archiveCheck.VolumeMounts))
+		for i, vm := range archiveCheck.VolumeMounts {
+			mountPaths[i] = vm.MountPath
+		}
+		Expect(mountPaths).To(ContainElement(acDatabasePath))
+		Expect(mountPaths).To(ContainElement("/etc/litestream"))
+	})
+
+	It("archive-check init container has S3 credential env vars", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+
+		envNames := make([]string, len(archiveCheck.Env))
+		for i, e := range archiveCheck.Env {
+			envNames[i] = e.Name
+		}
+		Expect(envNames).To(ContainElements("LITESTREAM_ACCESS_KEY_ID", "LITESTREAM_SECRET_ACCESS_KEY"))
+
+		for _, e := range archiveCheck.Env {
+			if e.Name == "LITESTREAM_ACCESS_KEY_ID" {
+				Expect(e.ValueFrom.SecretKeyRef.Name).To(Equal(acSecretRef))
+			}
+		}
+	})
+
+	It("archive-check script references the correct database path", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		script := strings.Join(archiveCheck.Command, " ")
+		Expect(script).To(ContainSubstring(acDatabasePath + "/" + acDatabaseName))
+	})
+
+	It("does not inject archive-check when backup is disabled", func() {
+		db := &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: acDBName, Namespace: namespace},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:     acDatabaseName,
+				DatabasePath:     acDatabasePath,
+				TargetDeployment: acDeployName,
+				Backup:           databasev1.BackupSpec{Enabled: false},
+			},
+		}
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		for _, c := range patched.Spec.InitContainers {
+			Expect(c.Name).NotTo(Equal("litestream-archive-check"))
+		}
+	})
+
+	It("does not inject archive-check when skip-archive-check annotation is set on SQLiteDB", func() {
+		annotations := map[string]string{
+			databasev1.AnnotationSkipArchiveCheck: "true",
+		}
+		Expect(k8sClient.Create(ctx, newBackupDB(annotations))).To(Succeed())
+
+		podAnnotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(podAnnotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(podAnnotations), resp.Patches)
+		for _, c := range patched.Spec.InitContainers {
+			Expect(c.Name).NotTo(Equal("litestream-archive-check"))
+		}
+	})
+
+	It("archive-check init container uses the same image as the Litestream sidecar", func() {
+		const customImage = "litestream/litestream:custom-tag"
+		db := newBackupDB(nil)
+		db.Spec.Image = customImage
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		var sidecar corev1.Container
+		for _, c := range patched.Spec.Containers {
+			if c.Name == "litestream" {
+				sidecar = c
+				break
+			}
+		}
+		Expect(archiveCheck.Image).To(Equal(sidecar.Image))
+		Expect(archiveCheck.Image).To(Equal(customImage))
+	})
+})
+
+var _ = Describe("SidecarInjector error paths", func() {
+	const (
+		namespace         = "default"
+		errDBName         = "err-test-db"
+		errDeployName     = "err-test-app"
+		errDatabasePath   = "/data"
+		errVolumeName     = "err-data"
+		appContainerImage = "busybox" // goconst
+	)
+
+	ctx := context.Background()
+
+	newInjector := func() *webhook.SidecarInjector {
+		return &webhook.SidecarInjector{
+			Client:  k8sClient,
+			Decoder: admission.NewDecoder(k8sClient.Scheme()),
+		}
+	}
+
+	makeRequest := func(pod *corev1.Pod) admission.Request {
+		raw, err := json.Marshal(pod)
+		Expect(err).NotTo(HaveOccurred())
+		return admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{
+				UID: "test-uid", Namespace: namespace,
+				Operation: admissionv1.Create,
+				Object:    runtime.RawExtension{Raw: raw},
+			},
+		}
+	}
+
+	BeforeEach(func() {
+		db := &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: errDBName, Namespace: namespace},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:     "app.db",
+				DatabasePath:     errDatabasePath,
+				TargetDeployment: errDeployName,
+			},
+		}
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		db := &databasev1.SQLiteDB{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: errDBName, Namespace: namespace}, db); err == nil {
+			_ = k8sClient.Delete(ctx, db)
+		}
+	})
+
+	It("returns an error when the config annotation is malformed (no '/' separator)", func() {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "err-pod", Namespace: namespace,
+				Annotations: map[string]string{
+					databasev1.AnnotationInject: "true",
+					databasev1.AnnotationConfig: "bad-ref-no-slash", // malformed
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "app", Image: appContainerImage,
+					VolumeMounts: []corev1.VolumeMount{{Name: errVolumeName, MountPath: errDatabasePath}},
+				}},
+				Volumes: []corev1.Volume{{
+					Name:         errVolumeName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+			},
+		}
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Code).To(BeNumerically("==", 500))
+	})
+
+	It("returns an error when the referenced SQLiteDB does not exist", func() {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "err-pod-missing-db", Namespace: namespace,
+				Annotations: map[string]string{
+					databasev1.AnnotationInject: "true",
+					databasev1.AnnotationConfig: namespace + "/nonexistent-db",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "app", Image: appContainerImage,
+					VolumeMounts: []corev1.VolumeMount{{Name: errVolumeName, MountPath: errDatabasePath}},
+				}},
+				Volumes: []corev1.Volume{{
+					Name:         errVolumeName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+			},
+		}
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Code).To(BeNumerically("==", 500))
+	})
+
+	It("returns an error when no volume mount covers the database path", func() {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "err-pod-no-vol", Namespace: namespace,
+				Annotations: map[string]string{
+					databasev1.AnnotationInject: "true",
+					databasev1.AnnotationConfig: namespace + "/" + errDBName,
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "app",
+					Image: appContainerImage,
+					// Mount at /other — does NOT cover errDatabasePath (/data).
+					VolumeMounts: []corev1.VolumeMount{{Name: errVolumeName, MountPath: "/other"}},
+				}},
+				Volumes: []corev1.Volume{{
+					Name:         errVolumeName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+			},
+		}
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Code).To(BeNumerically("==", 500))
+	})
+
+	It("returns an error when the first container has no volume mounts", func() {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "err-pod-no-mounts", Namespace: namespace,
+				Annotations: map[string]string{
+					databasev1.AnnotationInject: "true",
+					databasev1.AnnotationConfig: namespace + "/" + errDBName,
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "app",
+					Image: appContainerImage,
+					// No VolumeMounts at all.
+				}},
+			},
+		}
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Code).To(BeNumerically("==", 500))
+	})
+})
+
 // applyInitPatches reconstructs the mutated pod from JSON-patch add operations
 // produced by admission.PatchResponseFromRaw. The path for appended array
 // elements uses a numeric index (e.g. /spec/containers/1), so we match on

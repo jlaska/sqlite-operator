@@ -108,9 +108,14 @@ spec:
                   Message contains a human-readable description of the current phase,
                   including any error details on failure.
                 type: string
+              originalReplicas:
+                description: |-
+                  OriginalReplicas records the target Deployment's replica count before
+                  scale-down so it can be restored after the restore Job completes.
+                format: int32
+                type: integer
               phase:
-                description: 'Phase is the current lifecycle state: Pending, Running,
-                  Complete, Failed.'
+                description: Phase is the current lifecycle state.
                 type: string
               startTime:
                 description: StartTime is when the restore Job was created.

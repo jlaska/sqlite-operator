@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
@@ -186,6 +187,143 @@ var _ = Describe("SQLiteDB Controller", func() {
 		Expect(result.RequeueAfter).To(Equal(statusSyncInterval))
 	})
 
+	Context("replication pause", func() {
+		It("produces empty dbs config when pause annotation is set", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			if db.Annotations == nil {
+				db.Annotations = map[string]string{}
+			}
+			db.Annotations[databasev1.AnnotationPause] = "true"
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-litestream", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["litestream.yml"]).To(Equal("dbs: []\n"))
+		})
+
+		It("produces normal config when pause annotation is absent", func() {
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-litestream", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+			Expect(cm.Data["litestream.yml"]).NotTo(Equal("dbs: []\n"))
+		})
+
+		It("reverts config to normal after pause annotation is removed", func() {
+			// Set pause.
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			if db.Annotations == nil {
+				db.Annotations = map[string]string{}
+			}
+			db.Annotations[databasev1.AnnotationPause] = "true"
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-litestream", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["litestream.yml"]).To(Equal("dbs: []\n"))
+
+			// Remove pause.
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			delete(db.Annotations, databasev1.AnnotationPause)
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: resourceName + "-litestream", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+			Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+		})
+
+		It("sets ReplicationPaused condition to True when pause annotation is set", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			if db.Annotations == nil {
+				db.Annotations = map[string]string{}
+			}
+			db.Annotations[databasev1.AnnotationPause] = "true"
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionReplicationPaused)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("PauseAnnotationSet"))
+		})
+
+		It("sets ReplicationPaused condition to False when pause annotation is absent", func() {
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionReplicationPaused)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("ReplicationActive"))
+		})
+
+		It("sets phase to Paused when pause annotation is set", func() {
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			if db.Annotations == nil {
+				db.Annotations = map[string]string{}
+			}
+			db.Annotations[databasev1.AnnotationPause] = "true"
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			Expect(db.Status.Phase).To(Equal(databasev1.PhasePaused))
+		})
+
+		It("reverts phase from Paused when pause annotation is removed", func() {
+			// Set pause.
+			db := &databasev1.SQLiteDB{}
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			if db.Annotations == nil {
+				db.Annotations = map[string]string{}
+			}
+			db.Annotations[databasev1.AnnotationPause] = "true"
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			Expect(db.Status.Phase).To(Equal(databasev1.PhasePaused))
+
+			// Remove pause.
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			delete(db.Annotations, databasev1.AnnotationPause)
+			Expect(k8sClient.Update(ctx, db)).To(Succeed())
+			_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			Expect(db.Status.Phase).NotTo(Equal(databasev1.PhasePaused))
+		})
+	})
+
 	Context("init SQL management", func() {
 		const initSQL = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
 
@@ -258,6 +396,381 @@ var _ = Describe("SQLiteDB Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(cond.Reason).To(Equal("ConfigMapReady"))
+		})
+	})
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure-function and helper tests — no envtest required for most.
+// ─────────────────────────────────────────────────────────────────────────────
+
+var _ = Describe("isFailureReason", func() {
+	DescribeTable("classifies container waiting reasons correctly",
+		func(reason string, expected bool) {
+			Expect(isFailureReason(reason)).To(Equal(expected))
+		},
+		Entry("CrashLoopBackOff → true", "CrashLoopBackOff", true),
+		Entry("OOMKilled → true", "OOMKilled", true),
+		Entry("Error → true", "Error", true),
+		Entry("ImagePullBackOff → true", "ImagePullBackOff", true),
+		Entry("ErrImagePull → true", "ErrImagePull", true),
+		Entry("ContainerCreating → false", "ContainerCreating", false),
+		Entry("PodInitializing → false", "PodInitializing", false),
+		Entry("Running → false", "Running", false),
+		Entry("empty string → false", "", false),
+	)
+})
+
+var _ = Describe("buildLitestreamConfig", func() {
+	var reconciler *SQLiteDBReconciler
+
+	BeforeEach(func() {
+		reconciler = &SQLiteDBReconciler{}
+	})
+
+	newDB := func(path, name string, backup databasev1.BackupSpec) *databasev1.SQLiteDB {
+		return &databasev1.SQLiteDB{
+			Spec: databasev1.SQLiteDBSpec{
+				DatabasePath: path,
+				DatabaseName: name,
+				Backup:       backup,
+			},
+		}
+	}
+
+	It("produces minimal config when backup is disabled", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{Enabled: false})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("dbs:"))
+		Expect(cfg).To(ContainSubstring("/data/app.db"))
+		Expect(cfg).NotTo(ContainSubstring("replica:"))
+		Expect(cfg).NotTo(ContainSubstring("type: s3"))
+	})
+
+	It("includes full S3 replica block when backup is enabled", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{Bucket: "mybucket", SecretRef: "creds"},
+			},
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("type: s3"))
+		Expect(cfg).To(ContainSubstring("bucket: mybucket"))
+		Expect(cfg).NotTo(ContainSubstring("endpoint:"))        // no endpoint for AWS S3
+		Expect(cfg).NotTo(ContainSubstring("force-path-style")) // no force-path-style without endpoint
+	})
+
+	It("auto-prefixes endpoint with http:// when no scheme present", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{
+					Endpoint:  "minio.homelab:9000",
+					Bucket:    "b",
+					SecretRef: "s",
+				},
+			},
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("endpoint: http://minio.homelab:9000"))
+		Expect(cfg).To(ContainSubstring("force-path-style: true"))
+	})
+
+	It("preserves https:// scheme and does not double-prefix", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{
+					Endpoint:  "https://s3.example.com",
+					Bucket:    "b",
+					SecretRef: "s",
+				},
+			},
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("endpoint: https://s3.example.com"))
+		Expect(cfg).NotTo(ContainSubstring("http://https://"))
+	})
+
+	It("preserves http:// scheme and does not double-prefix", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{
+					Endpoint:  "http://minio:9000",
+					Bucket:    "b",
+					SecretRef: "s",
+				},
+			},
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("endpoint: http://minio:9000"))
+		Expect(cfg).NotTo(ContainSubstring("http://http://"))
+	})
+
+	It("includes path when set", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{
+					Bucket:    "b",
+					Path:      "myapp/",
+					SecretRef: "s",
+				},
+			},
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("path: myapp/"))
+	})
+
+	It("includes retention when set", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{Bucket: "b", SecretRef: "s"},
+			},
+			Retention: databasev1.RetentionPolicy{Duration: "168h"},
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("retention: 168h"))
+	})
+})
+
+var _ = Describe("litestreamContainerState and archiveCheckState", func() {
+	// These tests use envtest to create Pods with manually-patched container statuses.
+	const (
+		lsTestNamespace = "default"
+		lsDepName       = "ls-state-app"
+		lsDBName        = "ls-state-db"
+		lsSecretRef     = "ls-creds"
+	)
+
+	ctx := context.Background()
+
+	var (
+		deployment *appsv1.Deployment
+		sqliteDB   *databasev1.SQLiteDB
+		reconciler *SQLiteDBReconciler
+	)
+
+	BeforeEach(func() {
+		reconciler = &SQLiteDBReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: record.NewFakeRecorder(10),
+		}
+
+		replicas := int32(1)
+		deployment = &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: lsDepName, Namespace: lsTestNamespace},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"app": lsDepName},
+				},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": lsDepName}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
+
+		sqliteDB = &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: lsDBName, Namespace: lsTestNamespace},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:     "app.db",
+				DatabasePath:     "/data",
+				TargetDeployment: lsDepName,
+				Backup: databasev1.BackupSpec{
+					Enabled: true,
+					Destination: databasev1.BackupDestination{
+						S3: &databasev1.S3Destination{Bucket: "b", SecretRef: lsSecretRef},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, sqliteDB)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		_ = k8sClient.Delete(ctx, sqliteDB)
+		_ = k8sClient.Delete(ctx, deployment)
+		// Clean up any pods created during tests.
+		podList := &corev1.PodList{}
+		_ = k8sClient.List(ctx, podList,
+			client.InNamespace(lsTestNamespace),
+			client.MatchingLabels{"app": lsDepName})
+		for i := range podList.Items {
+			_ = k8sClient.Delete(ctx, &podList.Items[i])
+		}
+	})
+
+	Describe("litestreamContainerState", func() {
+		It("returns healthy=false when no pods exist", func() {
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			Expect(healthy).To(BeFalse())
+			Expect(msg).To(ContainSubstring("no pods with Litestream sidecar found"))
+		})
+
+		It("returns healthy=true when sidecar is Running", func() {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ls-running-pod",
+					Namespace: lsTestNamespace,
+					Labels:    map[string]string{"app": lsDepName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			now := metav1.Now()
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name:  "litestream",
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: now}},
+				},
+			}
+			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
+
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			Expect(healthy).To(BeTrue())
+			Expect(msg).To(ContainSubstring("running in 1 pod"))
+		})
+
+		It("returns healthy=false when sidecar is in CrashLoopBackOff", func() {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ls-crashloop-pod",
+					Namespace: lsTestNamespace,
+					Labels:    map[string]string{"app": lsDepName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: "litestream",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+					},
+				},
+			}
+			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
+
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			Expect(healthy).To(BeFalse())
+			Expect(msg).To(ContainSubstring("unhealthy"))
+		})
+
+		It("returns healthy=false when sidecar terminated with non-zero exit", func() {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ls-terminated-pod",
+					Namespace: lsTestNamespace,
+					Labels:    map[string]string{"app": lsDepName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: "litestream",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
+					},
+				},
+			}
+			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
+
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			Expect(healthy).To(BeFalse())
+			Expect(msg).To(ContainSubstring("unhealthy"))
+		})
+	})
+
+	Describe("archiveCheckState", func() {
+		It("returns (false, passed) when backup is disabled", func() {
+			sqliteDB.Spec.Backup.Enabled = false
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			Expect(failed).To(BeFalse())
+			Expect(msg).To(Equal("backup not enabled"))
+		})
+
+		It("returns (false, passed) when no pods exist", func() {
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			Expect(failed).To(BeFalse())
+			Expect(msg).To(Equal("archive check passed"))
+		})
+
+		It("returns (true, failed) when archive-check init container exited non-zero", func() {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "archive-check-fail-pod",
+					Namespace: lsTestNamespace,
+					Labels:    map[string]string{"app": lsDepName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: "litestream-archive-check",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
+					},
+				},
+			}
+			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
+
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			Expect(failed).To(BeTrue())
+			Expect(msg).To(ContainSubstring("archive check failed"))
+		})
+
+		It("returns (false, passed) when archive-check init container exited zero", func() {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "archive-check-pass-pod",
+					Namespace: lsTestNamespace,
+					Labels:    map[string]string{"app": lsDepName},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
+				{
+					Name: "litestream-archive-check",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
+					},
+				},
+			}
+			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
+
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			Expect(failed).To(BeFalse())
+			Expect(msg).To(Equal("archive check passed"))
 		})
 	})
 })

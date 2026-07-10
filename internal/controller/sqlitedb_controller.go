@@ -48,8 +48,10 @@ const statusSyncInterval = 2 * time.Minute
 // Expose annotation keys as package-level aliases so tests can reference them
 // without importing the API package directly.
 const (
-	injectAnnotation = databasev1.AnnotationInject
-	configAnnotation = databasev1.AnnotationConfig
+	injectAnnotation      = databasev1.AnnotationInject
+	configAnnotation      = databasev1.AnnotationConfig
+	pauseAnnotation       = databasev1.AnnotationPause
+	skipArchiveAnnotation = databasev1.AnnotationSkipArchiveCheck
 )
 
 // SQLiteDBReconciler reconciles a SQLiteDB object
@@ -105,6 +107,8 @@ func (r *SQLiteDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 // reconcileLitestreamConfig creates or updates the ConfigMap holding litestream.yml.
+// When the pause annotation is set, writes an empty dbs list so Litestream runs
+// but replicates nothing — protecting the S3 backup chain during restores.
 func (r *SQLiteDBReconciler) reconcileLitestreamConfig(ctx context.Context, sqliteDB *databasev1.SQLiteDB) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -114,8 +118,14 @@ func (r *SQLiteDBReconciler) reconcileLitestreamConfig(ctx context.Context, sqli
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		var config string
+		if sqliteDB.Annotations[pauseAnnotation] == "true" {
+			config = "dbs: []\n"
+		} else {
+			config = r.buildLitestreamConfig(sqliteDB)
+		}
 		cm.Data = map[string]string{
-			"litestream.yml": r.buildLitestreamConfig(sqliteDB),
+			"litestream.yml": config,
 		}
 		return controllerutil.SetControllerReference(sqliteDB, cm, r.Scheme)
 	})
@@ -354,6 +364,34 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 		return r.Status().Patch(ctx, sqliteDB, patch)
 	}
 
+	// --- ReplicationPaused condition ---
+	isPaused := sqliteDB.Annotations[pauseAnnotation] == "true"
+	if isPaused {
+		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReplicationPaused,
+			metav1.ConditionTrue, "PauseAnnotationSet",
+			"replication paused via annotation",
+			sqliteDB.Generation, now)
+	} else {
+		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReplicationPaused,
+			metav1.ConditionFalse, "ReplicationActive",
+			"replication is active",
+			sqliteDB.Generation, now)
+	}
+
+	// --- ArchiveCheckFailed condition (from archive-check init container status) ---
+	if archiveCheckFailed, msg := r.archiveCheckState(ctx, sqliteDB, deployment); archiveCheckFailed {
+		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionArchiveCheckFailed,
+			metav1.ConditionTrue, "ArchiveCheckFailed", msg,
+			sqliteDB.Generation, now)
+		sqliteDB.Status.Phase = databasev1.PhaseError
+		sqliteDB.Status.Ready = false
+		return r.Status().Patch(ctx, sqliteDB, patch)
+	} else {
+		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionArchiveCheckFailed,
+			metav1.ConditionFalse, "ArchiveCheckPassed", msg,
+			sqliteDB.Generation, now)
+	}
+
 	// --- SidecarInjected condition ---
 	annotated := deployment.Spec.Template.Annotations[injectAnnotation] == "true"
 	if annotated {
@@ -398,6 +436,17 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 			sqliteDB.Generation, now)
 	}
 
+	// --- Paused phase (overrides Ready/Pending) ---
+	if isPaused {
+		sqliteDB.Status.Phase = databasev1.PhasePaused
+		sqliteDB.Status.Ready = false
+		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReady,
+			metav1.ConditionFalse, "ReplicationPaused",
+			"replication is paused; waiting for pause annotation to be removed",
+			sqliteDB.Generation, now)
+		return r.Status().Patch(ctx, sqliteDB, patch)
+	}
+
 	// --- Ready condition ---
 	if annotated && deployment.Status.ReadyReplicas > 0 {
 		sqliteDB.Status.Phase = databasev1.PhaseReady
@@ -416,6 +465,40 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 	}
 
 	return r.Status().Patch(ctx, sqliteDB, patch)
+}
+
+// archiveCheckState inspects pods to detect whether the archive-check init container
+// has failed. Returns (failed, message). A failure means the DB is missing but S3
+// has existing backup data — the pod is blocked until a SQLiteRestore resolves it.
+func (r *SQLiteDBReconciler) archiveCheckState(ctx context.Context, sqliteDB *databasev1.SQLiteDB, deployment *appsv1.Deployment) (bool, string) {
+	if !sqliteDB.Spec.Backup.Enabled {
+		return false, "backup not enabled"
+	}
+
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(sqliteDB.Namespace),
+		client.MatchingLabels(deployment.Spec.Selector.MatchLabels),
+	); err != nil {
+		return false, fmt.Sprintf("failed to list pods: %v", err)
+	}
+
+	const archiveCheckContainer = "litestream-archive-check"
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if cs.Name != archiveCheckContainer {
+				continue
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+				return true, fmt.Sprintf(
+					"archive check failed in pod %s: S3 has existing backup data but local database is missing; create a SQLiteRestore CR to recover",
+					pod.Name,
+				)
+			}
+		}
+	}
+	return false, "archive check passed"
 }
 
 // setCondition is a thin wrapper around meta.SetStatusCondition that fills in

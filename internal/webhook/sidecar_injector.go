@@ -37,6 +37,9 @@ const litestreamContainerName = "litestream"
 // litestreamConfigVolume is the name of the volume that mounts litestream.yml.
 const litestreamConfigVolume = "litestream-config"
 
+// archiveCheckContainerName is the name of the archive-check init container.
+const archiveCheckContainerName = "litestream-archive-check"
+
 // sqliteInitContainerName is the name given to the injected init container.
 const sqliteInitContainerName = "sqlite-init"
 
@@ -160,27 +163,7 @@ func (s *SidecarInjector) inject(pod *corev1.Pod, db *databasev1.SQLiteDB) error
 
 	// Inject S3 credentials as environment variables from the referenced Secret.
 	if db.Spec.Backup.Enabled && db.Spec.Backup.Destination.S3 != nil {
-		secretRef := db.Spec.Backup.Destination.S3.SecretRef
-		sidecar.Env = []corev1.EnvVar{
-			{
-				Name: "LITESTREAM_ACCESS_KEY_ID",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: secretRef},
-						Key:                  "ACCESS_KEY_ID",
-					},
-				},
-			},
-			{
-				Name: "LITESTREAM_SECRET_ACCESS_KEY",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: secretRef},
-						Key:                  "SECRET_ACCESS_KEY",
-					},
-				},
-			},
-		}
+		sidecar.Env = s3CredsEnvVars(db.Spec.Backup.Destination.S3.SecretRef)
 	}
 
 	pod.Spec.Containers = append(pod.Spec.Containers, sidecar)
@@ -197,12 +180,107 @@ func (s *SidecarInjector) inject(pod *corev1.Pod, db *databasev1.SQLiteDB) error
 		},
 	})
 
-	// Inject the init container when InitSQL is configured.
+	// Inject the archive-check init container first (gates whether the pod should
+	// start) when backup is enabled and the skip annotation is not set.
+	if db.Spec.Backup.Enabled && db.Annotations[databasev1.AnnotationSkipArchiveCheck] != "true" {
+		s.injectArchiveCheckContainer(pod, db, volumeName)
+	}
+
+	// Inject the SQL init container when InitSQL is configured.
 	if db.Spec.InitSQL != "" {
 		s.injectInitContainer(pod, db, volumeName)
 	}
 
 	return nil
+}
+
+// injectArchiveCheckContainer injects an init container that checks whether the
+// DB file exists on the PVC. If the DB is missing but S3 already has backup data,
+// the container exits non-zero, blocking pod startup and preventing Litestream from
+// creating a new snapshot chain over the existing backup. This mirrors CNPG's
+// "empty WAL archive check" pattern.
+//
+// The check runs before the app starts, so there is no race with app DB initialization.
+func (s *SidecarInjector) injectArchiveCheckContainer(pod *corev1.Pod, db *databasev1.SQLiteDB, dataVolumeName string) {
+	image := db.Spec.Image
+	if image == "" {
+		image = "litestream/litestream:0.5.14"
+	}
+
+	dbFullPath := db.Spec.DatabasePath + "/" + db.Spec.DatabaseName
+
+	// Shell script logic:
+	//   1. If the DB file exists → pass (normal restart or first-time setup with pre-existing DB).
+	//   2. If DB is missing AND S3 has snapshots → fail with actionable message.
+	//   3. If DB is missing AND S3 is empty → pass (first-time setup).
+	script := fmt.Sprintf(`
+DB_PATH="%s"
+if [ -f "${DB_PATH}" ]; then
+  echo "archive-check: database file exists, skipping check"
+  exit 0
+fi
+echo "archive-check: database file missing at ${DB_PATH}, checking S3..."
+SNAPSHOTS=$(litestream snapshots -config /etc/litestream/litestream.yml "${DB_PATH}" 2>/dev/null | wc -l | tr -d ' ')
+if [ "${SNAPSHOTS}" -gt 0 ] 2>/dev/null; then
+  echo "archive-check FAILED: S3 has ${SNAPSHOTS} snapshot(s) but local database is missing."
+  echo "This likely means data was lost (PVC wiped or DB deleted)."
+  echo "To recover: create a SQLiteRestore CR targeting this PVC."
+  echo "To bypass (start fresh): set annotation sqlite.database.example.com/skip-archive-check=true"
+  exit 1
+fi
+echo "archive-check: no S3 snapshots found, safe to proceed (first-time setup)"
+exit 0
+`, dbFullPath)
+
+	envVars := []corev1.EnvVar{}
+	if db.Spec.Backup.Destination.S3 != nil {
+		envVars = s3CredsEnvVars(db.Spec.Backup.Destination.S3.SecretRef)
+	}
+
+	archiveCheck := corev1.Container{
+		Name:    archiveCheckContainerName,
+		Image:   image,
+		Command: []string{"sh", "-c", script},
+		Env:     envVars,
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      dataVolumeName,
+				MountPath: db.Spec.DatabasePath,
+			},
+			{
+				Name:      litestreamConfigVolume,
+				MountPath: "/etc/litestream",
+				ReadOnly:  true,
+			},
+		},
+	}
+
+	// Prepend so it runs before sqlite-init.
+	pod.Spec.InitContainers = append([]corev1.Container{archiveCheck}, pod.Spec.InitContainers...)
+}
+
+// s3CredsEnvVars builds S3 credential env vars from a Secret reference.
+func s3CredsEnvVars(secretRef string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{
+			Name: "LITESTREAM_ACCESS_KEY_ID",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretRef},
+					Key:                  "ACCESS_KEY_ID",
+				},
+			},
+		},
+		{
+			Name: "LITESTREAM_SECRET_ACCESS_KEY",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretRef},
+					Key:                  "SECRET_ACCESS_KEY",
+				},
+			},
+		},
+	}
 }
 
 // injectInitContainer adds an init container that applies InitSQL to the

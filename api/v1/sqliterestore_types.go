@@ -22,10 +22,13 @@ import (
 
 // RestorePhase constants for SQLiteRestoreStatus.Phase.
 const (
-	RestorePhasePending  = "Pending"
-	RestorePhaseRunning  = "Running"
-	RestorePhaseComplete = "Complete"
-	RestorePhaseFailed   = "Failed"
+	RestorePhasePending     = "Pending"
+	RestorePhasePausing     = "Pausing"     // pause annotation set, waiting for ConfigMap propagation
+	RestorePhaseScalingDown = "ScalingDown" // Deployment scaled to 0, waiting for pods to terminate
+	RestorePhaseRunning     = "Running"
+	RestorePhaseScalingUp   = "ScalingUp" // restore done, scaling Deployment back up
+	RestorePhaseComplete    = "Complete"
+	RestorePhaseFailed      = "Failed"
 )
 
 // SQLiteRestoreSpec defines the desired state of a SQLiteRestore operation.
@@ -61,11 +64,15 @@ type SQLiteRestoreSpec struct {
 
 // SQLiteRestoreStatus defines the observed state of a SQLiteRestore operation.
 type SQLiteRestoreStatus struct {
-	// Phase is the current lifecycle state: Pending, Running, Complete, Failed.
+	// Phase is the current lifecycle state.
 	Phase string `json:"phase,omitempty"`
 
 	// JobName is the name of the Kubernetes Job created to perform the restore.
 	JobName string `json:"jobName,omitempty"`
+
+	// OriginalReplicas records the target Deployment's replica count before
+	// scale-down so it can be restored after the restore Job completes.
+	OriginalReplicas *int32 `json:"originalReplicas,omitempty"`
 
 	// StartTime is when the restore Job was created.
 	StartTime *metav1.Time `json:"startTime,omitempty"`

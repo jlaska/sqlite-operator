@@ -115,6 +115,17 @@ const (
 	// AnnotationConfig records the "namespace/name" reference to the SQLiteDB CR
 	// that configures the sidecar for a given pod.
 	AnnotationConfig = "sqlite.database.example.com/config"
+
+	// AnnotationPause, when set to "true" on a SQLiteDB CR, causes the controller
+	// to write an empty dbs list to the Litestream ConfigMap, pausing replication
+	// without killing the sidecar process. Used by the restore controller during
+	// coordinated restores and available for manual operational use.
+	AnnotationPause = "sqlite.database.example.com/pause"
+
+	// AnnotationSkipArchiveCheck, when set to "true" on a SQLiteDB CR, disables
+	// the archive-check init container injected by the webhook. Use when
+	// intentionally starting fresh against an existing S3 backup chain.
+	AnnotationSkipArchiveCheck = "sqlite.database.example.com/skip-archive-check"
 )
 
 // Condition type constants.
@@ -130,6 +141,15 @@ const (
 	// the init container is ready to apply it on next pod start.
 	ConditionInitSQLApplied = "InitSQLApplied"
 
+	// ConditionReplicationPaused indicates that Litestream replication has been
+	// intentionally paused via the AnnotationPause annotation.
+	ConditionReplicationPaused = "ReplicationPaused"
+
+	// ConditionArchiveCheckFailed indicates that the archive-check init container
+	// detected a mismatch: the local DB is missing but S3 has existing backup data.
+	// The pod is blocked from starting until a SQLiteRestore resolves the state.
+	ConditionArchiveCheckFailed = "ArchiveCheckFailed"
+
 	// ConditionReady is the top-level readiness condition.
 	ConditionReady = "Ready"
 )
@@ -139,6 +159,7 @@ const (
 	PhaseConfiguring = "Configuring"
 	PhasePending     = "Pending"
 	PhaseReady       = "Ready"
+	PhasePaused      = "Paused"
 	PhaseError       = "Error"
 )
 
