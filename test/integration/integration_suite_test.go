@@ -162,7 +162,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:latest
+          image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
           args: ["server", "/data", "--console-address", ":9001"]
           env:
             - name: MINIO_ROOT_USER
@@ -206,7 +206,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: mc
-      image: quay.io/minio/mc:latest
+      image: quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z
       command: ["sleep", "infinity"]
 `, testNamespace)
 }
@@ -225,7 +225,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: quay.io/minio/mc:latest
+          image: quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z
           command:
             - /bin/sh
             - -c

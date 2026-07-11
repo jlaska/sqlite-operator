@@ -240,7 +240,9 @@ var _ = Describe("SQLiteRestore Controller", func() {
 			}
 		}
 		Expect(pvcVol.PersistentVolumeClaim.ClaimName).To(Equal(targetPVC))
-		Expect(cmVol.ConfigMap.Name).To(Equal(sourceDBName + "-litestream"))
+		// The restore job must mount its OWN ConfigMap (restore.Name + "-litestream"),
+		// NOT the source SQLiteDB's ConfigMap — which is paused (dbs: []) at this point.
+		Expect(cmVol.ConfigMap.Name).To(Equal(restoreName + "-litestream"))
 
 		mounts := job.Spec.Template.Spec.Containers[0].VolumeMounts
 		// Two mounts: target PVC at /data and litestream-config at /etc/litestream.

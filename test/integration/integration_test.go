@@ -59,9 +59,9 @@ var _ = Describe("Integration", Ordered, func() {
 		})
 
 		AfterAll(func() {
-			runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
-			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
-			runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
+			runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		})
 
 		It("injects the Litestream sidecar into new pods after SQLiteDB CR is created", func() {
@@ -112,6 +112,8 @@ var _ = Describe("Integration", Ordered, func() {
 		)
 
 		BeforeAll(func() {
+			DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
+
 			By("creating test PVC")
 			applyLiteral(pvcManifest(pvcName, testNamespace))
 
@@ -137,7 +139,7 @@ var _ = Describe("Integration", Ordered, func() {
 
 		AfterAll(func() {
 			// Leave the SQLiteDB and its backup intact — Scenario 3 restores from it.
-			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
+			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		})
 
 		It("init container applies initSQL and creates the events table", func() {
@@ -160,8 +162,18 @@ var _ = Describe("Integration", Ordered, func() {
 
 			By("waiting for Litestream to replicate to MinIO")
 			Eventually(func(g Gomega) {
+				// Check the expected path first.
 				out := mcList(minioBucket + "/" + dbName + "/")
-				g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
+				if out == "" {
+					// Fall back: check the whole bucket so a path mismatch surfaces immediately.
+					all, _ := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
+						"/bin/sh", "-c", "mc ls --recursive local/"+minioBucket+"/")
+					g.Expect(out).NotTo(BeEmpty(),
+						"expected backup objects at %s/%s/ — full bucket contents:\n%s",
+						minioBucket, dbName, all)
+				} else {
+					g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
+				}
 			}, 3*time.Minute, 10*time.Second).Should(Succeed())
 
 			By("verifying BackupHealthy condition is True on the SQLiteDB")
@@ -190,10 +202,13 @@ var _ = Describe("Integration", Ordered, func() {
 		})
 
 		AfterAll(func() {
-			runIgnoreError("kubectl", "delete", "sqliterestore", restoreName, "-n", testNamespace, "--ignore-not-found")
-			runIgnoreError("kubectl", "delete", "sqlitedb", sourceDBName, "-n", testNamespace, "--ignore-not-found")
-			runIgnoreError("kubectl", "delete", "pvc", restorePVC, "-n", testNamespace, "--ignore-not-found")
-			runIgnoreError("kubectl", "delete", "pvc", "backup-test-pvc", "-n", testNamespace, "--ignore-not-found")
+			// --wait=false: completed restore job pods hold PVC references; waiting for
+			// the PVC to fully disappear blocks indefinitely until async GC removes them.
+			// AfterSuite namespace deletion cleans up any remaining resources.
+			runIgnoreError("kubectl", "delete", "sqliterestore", restoreName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "sqlitedb", sourceDBName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "pvc", restorePVC, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "pvc", "backup-test-pvc", "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		})
 
 		It("restore Job completes and database file appears on the target PVC", func() {
@@ -224,9 +239,11 @@ var _ = Describe("Integration", Ordered, func() {
 						GinkgoWriter.Printf("\n=== restore Job pods ===\n%s\n", pods)
 						// --previous gets logs from the last terminated container
 						// even when the pod is currently between retries.
-						logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--previous", "--tail=50")
+						// --request-timeout prevents blocking indefinitely if the pod
+						// is in a transient state (Pending, initializing).
+						logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--previous", "--tail=50", "--request-timeout=15s")
 						if logs == "" {
-							logs, _ = kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50")
+							logs, _ = kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50", "--request-timeout=15s")
 						}
 						GinkgoWriter.Printf("=== restore Job logs ===\n%s\n========================\n", logs)
 					}
@@ -280,9 +297,9 @@ var _ = Describe("Replication Pause", Ordered, func() {
 		// Ensure pause annotation is removed even if test fails mid-way.
 		runIgnoreError("kubectl", "annotate", "sqlitedb", dbName, "-n", testNamespace,
 			"sqlite.database.example.com/pause-", "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 	})
 
 	It("pauses replication when annotation is set and resumes when removed", func() {
@@ -351,6 +368,8 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 	)
 
 	BeforeAll(func() {
+		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
+
 		By("creating PVC, Deployment, and SQLiteDB CR with backup enabled and initSQL")
 		applyLiteral(pvcManifest(pvcName, testNamespace))
 		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
@@ -375,15 +394,23 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 		By("waiting for Litestream to replicate the row to MinIO")
 		Eventually(func(g Gomega) {
 			out := mcList(minioBucket + "/" + dbName + "/")
-			g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
+			if out == "" {
+				all, _ := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
+					"/bin/sh", "-c", "mc ls --recursive local/"+minioBucket+"/")
+				g.Expect(out).NotTo(BeEmpty(),
+					"expected backup objects at %s/%s/ — full bucket contents:\n%s",
+					minioBucket, dbName, all)
+			} else {
+				g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
+			}
 		}, 3*time.Minute, 10*time.Second).Should(Succeed())
 	})
 
 	AfterAll(func() {
-		runIgnoreError("kubectl", "delete", "sqliterestore", "archive-check-restore", "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "sqliterestore", "archive-check-restore", "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 	})
 
 	It("archive-check blocks pod startup when DB is missing and S3 has data", func() {
@@ -433,7 +460,7 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 				jobName, _ := kubectlQ("get", "sqliterestore", "archive-check-restore", "-n", testNamespace,
 					"-o", "jsonpath={.status.jobName}")
 				if jobName != "" {
-					logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50")
+					logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50", "--request-timeout=15s")
 					GinkgoWriter.Printf("\n=== restore Job logs ===\n%s\n========================\n", logs)
 				}
 			}
@@ -545,6 +572,7 @@ func sqliteDBManifest(name, ns, target, dbFile, dbPath string, backupEnabled boo
 	}
 	data, err := sigsyaml.Marshal(db)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	GinkgoWriter.Printf("--- SQLiteDB CR YAML applied (%s) ---\n%s\n", name, string(data))
 	return string(data)
 }
 
@@ -619,10 +647,54 @@ func runningPod(deploymentName string) string {
 func mcList(path string) string {
 	out, err := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
 		"/bin/sh", "-c",
-		fmt.Sprintf("mc ls local/%s 2>/dev/null", path),
+		fmt.Sprintf("mc ls local/%s", path),
 	)
 	if err != nil {
 		return ""
 	}
 	return out
+}
+
+// dumpReplicationDiagnostics prints a diagnostic snapshot to help debug Litestream
+// replication failures. Call via DeferCleanup before polling mc ls so the output
+// appears after any failure, regardless of which check timed out.
+// dbName is the SQLiteDB CR name (used for ConfigMap lookup: <dbName>-litestream).
+// dbFile is the database filename (used for sqlite3 access: /data/<dbFile>).
+func dumpReplicationDiagnostics(appName, dbName, dbFile string) {
+	GinkgoWriter.Printf("\n====== replication diagnostics: %s / %s ======\n", appName, dbName)
+
+	// 1. Litestream sidecar logs.
+	podName, podErr := kubectlQ("get", "pods", "-n", testNamespace,
+		"-l", "app="+appName, "-o", "jsonpath={.items[0].metadata.name}")
+	podName = strings.TrimSpace(podName)
+	if podErr == nil && podName != "" {
+		logs, _ := kubectlQ("logs", "-n", testNamespace, podName, "-c", "litestream", "--tail=100")
+		GinkgoWriter.Printf("--- Litestream sidecar logs (pod %s) ---\n%s\n", podName, logs)
+
+		journal, _ := kubectlQ("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", "/data/"+dbFile, "PRAGMA journal_mode;")
+		GinkgoWriter.Printf("--- SQLite journal_mode ---\n%s\n", journal)
+	} else {
+		GinkgoWriter.Printf("--- no running pod found for app=%s ---\n", appName)
+	}
+
+	// 2. Litestream ConfigMap content (named after the CR, not the db file).
+	cm, _ := kubectlQ("get", "configmap", dbName+"-litestream", "-n", testNamespace, "-o", "yaml")
+	GinkgoWriter.Printf("--- ConfigMap %s-litestream ---\n%s\n", dbName, cm)
+
+	// 3. Full bucket listing (recursive, entire bucket).
+	allObjects, _ := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
+		"/bin/sh", "-c", "mc ls --recursive local/"+minioBucket+"/")
+	GinkgoWriter.Printf("--- mc ls --recursive local/%s/ ---\n%s\n", minioBucket, allObjects)
+
+	// 4. mc alias verification.
+	aliasList, _ := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
+		"/bin/sh", "-c", "mc alias list local")
+	GinkgoWriter.Printf("--- mc alias list local ---\n%s\n", aliasList)
+
+	// 5. Pod container statuses (detect CrashLoopBackOff etc.).
+	podStatus, _ := kubectlQ("get", "pods", "-n", testNamespace, "-l", "app="+appName, "-o", "wide")
+	GinkgoWriter.Printf("--- pods for %s ---\n%s\n", appName, podStatus)
+
+	GinkgoWriter.Printf("====== end diagnostics ======\n\n")
 }

@@ -520,7 +520,7 @@ var _ = Describe("buildLitestreamConfig", func() {
 		Expect(cfg).NotTo(ContainSubstring("http://http://"))
 	})
 
-	It("includes path when set", func() {
+	It("includes path when set, stripping trailing slash", func() {
 		db := newDB("/data", "app.db", databasev1.BackupSpec{
 			Enabled: true,
 			Destination: databasev1.BackupDestination{
@@ -532,7 +532,11 @@ var _ = Describe("buildLitestreamConfig", func() {
 			},
 		})
 		cfg := reconciler.buildLitestreamConfig(db)
-		Expect(cfg).To(ContainSubstring("path: myapp/"))
+		// Trailing slash must be stripped: Litestream 0.5.x appends "/L{N}/" to the
+		// configured path, so a trailing slash produces "myapp//L0/" which MinIO
+		// rejects as XMinioInvalidObjectName.
+		Expect(cfg).To(ContainSubstring("path: myapp"))
+		Expect(cfg).NotTo(ContainSubstring("path: myapp/"))
 	})
 
 	It("includes retention when set", func() {

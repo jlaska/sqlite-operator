@@ -211,7 +211,14 @@ func (r *SQLiteRestoreReconciler) reconcileScalingDown(ctx context.Context, rest
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 	}
 
-	// All pods terminated — create the restore Job.
+	// All pods terminated — create a fresh litestream ConfigMap for the restore
+	// job. The source SQLiteDB's ConfigMap is currently paused (dbs: []) so
+	// the restore job needs its own copy with the actual S3 replica config.
+	if err := r.reconcileRestoreConfig(ctx, restore, sourceDB); err != nil {
+		return ctrl.Result{}, fmt.Errorf("creating restore litestream config: %w", err)
+	}
+
+	// Create the restore Job.
 	jobName := restore.Name + "-restore"
 	newJob := r.buildRestoreJob(restore, sourceDB, jobName)
 	if err := controllerutil.SetControllerReference(restore, newJob, r.Scheme); err != nil {
@@ -414,10 +421,9 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 		"restore",
 		"-config", "/etc/litestream/litestream.yml",
 		"-o", restore.Spec.TargetPath,
-		// -force allows job retries to overwrite a partial output file left by
-		// a previous failed attempt. Without it, litestream exits immediately
-		// if the output file already exists (even if incomplete).
-		"-force",
+		// Note: Litestream 0.5.x does not have a -force flag. If a partial output
+		// file exists from a previous failed attempt, Litestream overwrites it
+		// because it constructs the output from LTX snapshots from scratch.
 	}
 	if restore.Spec.Timestamp != "" {
 		args = append(args, "-timestamp", restore.Spec.Timestamp)
@@ -467,12 +473,14 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 							},
 						},
 						{
-							// Source DB's litestream.yml contains the S3 endpoint.
+							// Dedicated restore config with full S3 replica settings.
+							// The source SQLiteDB's ConfigMap is paused (dbs: []) during
+							// restore, so we use a fresh copy named after the restore CR.
 							Name: "litestream-config",
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: sourceDB.Name + "-litestream",
+										Name: restore.Name + "-litestream",
 									},
 								},
 							},
@@ -483,6 +491,25 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 		},
 	}
 	return job
+}
+
+// reconcileRestoreConfig creates a dedicated litestream ConfigMap for the restore
+// job. The source SQLiteDB's ConfigMap is paused (dbs: []) while a restore is in
+// progress, so the restore job needs its own copy of the full S3 replica config.
+func (r *SQLiteRestoreReconciler) reconcileRestoreConfig(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) error {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      restore.Name + "-litestream",
+			Namespace: restore.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Data = map[string]string{
+			"litestream.yml": buildLitestreamConfigYAML(sourceDB),
+		}
+		return controllerutil.SetControllerReference(restore, cm, r.Scheme)
+	})
+	return err
 }
 
 // s3EnvVars returns S3 credential env vars sourced from the named Secret.

@@ -152,7 +152,8 @@ test-integration-setup: docker-build ## Create Kind cluster (with Podman support
 	@for img in \
 	  litestream/litestream:0.5.14 \
 	  keinos/sqlite3:latest \
-	  quay.io/minio/mc:latest; do \
+	  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+	  quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z; do \
 	    echo "    pulling $$img"; \
 	    $(CONTAINER_TOOL) pull $$img; \
 	    $(_KIND_PROVIDER_ENV) $(KIND) load docker-image $$img --name $(INTEGRATION_KIND_CLUSTER); \
@@ -189,7 +190,8 @@ test-integration-redeploy: docker-build ## Rebuild image, reload into existing c
 	@for img in \
 	  litestream/litestream:0.5.14 \
 	  keinos/sqlite3:latest \
-	  quay.io/minio/mc:latest; do \
+	  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+	  quay.io/minio/mc:RELEASE.2024-11-21T17-21-54Z; do \
 	    echo "    $$img"; \
 	    $(CONTAINER_TOOL) pull $$img 2>/dev/null || true; \
 	    $(_KIND_PROVIDER_ENV) $(KIND) load docker-image $$img --name $(INTEGRATION_KIND_CLUSTER); \

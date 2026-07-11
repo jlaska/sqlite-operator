@@ -135,7 +135,15 @@ func (r *SQLiteDBReconciler) reconcileLitestreamConfig(ctx context.Context, sqli
 
 // buildLitestreamConfig renders the litestream.yml content for the given CR.
 // Uses the singular `replica:` key (Litestream 0.5.x preferred form).
+// This is a thin wrapper around the package-level buildLitestreamConfigYAML so
+// the restore controller can call the same logic without a method receiver.
 func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB) string {
+	return buildLitestreamConfigYAML(sqliteDB)
+}
+
+// buildLitestreamConfigYAML is the package-level implementation shared by both
+// the SQLiteDB and SQLiteRestore controllers.
+func buildLitestreamConfigYAML(sqliteDB *databasev1.SQLiteDB) string {
 	dbPath := fmt.Sprintf("%s/%s", sqliteDB.Spec.DatabasePath, sqliteDB.Spec.DatabaseName)
 
 	cfg := fmt.Sprintf("dbs:\n  - path: %s\n", dbPath)
@@ -158,7 +166,10 @@ func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB
 		}
 		cfg += fmt.Sprintf("      bucket: %s\n", s3.Bucket)
 		if s3.Path != "" {
-			cfg += fmt.Sprintf("      path: %s\n", s3.Path)
+			// Litestream 0.5.x appends "/L{N}/" to the configured path when
+			// constructing S3 object keys. A trailing slash produces "//L0/"
+			// which MinIO rejects as XMinioInvalidObjectName.
+			cfg += fmt.Sprintf("      path: %s\n", strings.TrimRight(s3.Path, "/"))
 		}
 		if sqliteDB.Spec.Backup.Retention.Duration != "" {
 			cfg += fmt.Sprintf("      retention: %s\n", sqliteDB.Spec.Backup.Retention.Duration)
