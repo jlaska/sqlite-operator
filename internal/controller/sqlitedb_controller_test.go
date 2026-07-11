@@ -552,6 +552,27 @@ var _ = Describe("buildLitestreamConfig", func() {
 	})
 })
 
+func createTestPod(ctx context.Context, name, namespace, appLabel string) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{"app": appLabel}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
+	}
+	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	return pod
+}
+
+func patchContainerStatuses(ctx context.Context, pod *corev1.Pod, statuses []corev1.ContainerStatus) {
+	patch := client.MergeFrom(pod.DeepCopy())
+	pod.Status.ContainerStatuses = statuses
+	Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
+}
+
+func patchInitContainerStatuses(ctx context.Context, pod *corev1.Pod, statuses []corev1.ContainerStatus) {
+	patch := client.MergeFrom(pod.DeepCopy())
+	pod.Status.InitContainerStatuses = statuses
+	Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
+}
+
 var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 	// These tests use envtest to create Pods with manually-patched container statuses.
 	const (
@@ -630,86 +651,33 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 		})
 
 		It("returns healthy=true when sidecar is Running", func() {
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "ls-running-pod",
-					Namespace: lsTestNamespace,
-					Labels:    map[string]string{"app": lsDepName},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
-				},
-			}
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-
-			now := metav1.Now()
-			patch := client.MergeFrom(pod.DeepCopy())
-			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
-				{
-					Name:  "litestream",
-					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: now}},
-				},
-			}
-			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
-
+			pod := createTestPod(ctx, "ls-running-pod", lsTestNamespace, lsDepName)
+			patchContainerStatuses(ctx, pod, []corev1.ContainerStatus{{
+				Name:  "litestream",
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+			}})
 			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
 			Expect(healthy).To(BeTrue())
 			Expect(msg).To(ContainSubstring("running in 1 pod"))
 		})
 
 		It("returns healthy=false when sidecar is in CrashLoopBackOff", func() {
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "ls-crashloop-pod",
-					Namespace: lsTestNamespace,
-					Labels:    map[string]string{"app": lsDepName},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
-				},
-			}
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-
-			patch := client.MergeFrom(pod.DeepCopy())
-			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
-				{
-					Name: "litestream",
-					State: corev1.ContainerState{
-						Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
-					},
-				},
-			}
-			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
-
+			pod := createTestPod(ctx, "ls-crashloop-pod", lsTestNamespace, lsDepName)
+			patchContainerStatuses(ctx, pod, []corev1.ContainerStatus{{
+				Name:  "litestream",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			}})
 			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
 			Expect(healthy).To(BeFalse())
 			Expect(msg).To(ContainSubstring("unhealthy"))
 		})
 
 		It("returns healthy=false when sidecar terminated with non-zero exit", func() {
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "ls-terminated-pod",
-					Namespace: lsTestNamespace,
-					Labels:    map[string]string{"app": lsDepName},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
-				},
-			}
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-
-			patch := client.MergeFrom(pod.DeepCopy())
-			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
-				{
-					Name: "litestream",
-					State: corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
-					},
-				},
-			}
-			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
-
+			pod := createTestPod(ctx, "ls-terminated-pod", lsTestNamespace, lsDepName)
+			patchContainerStatuses(ctx, pod, []corev1.ContainerStatus{{
+				Name:  "litestream",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+			}})
 			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
 			Expect(healthy).To(BeFalse())
 			Expect(msg).To(ContainSubstring("unhealthy"))
@@ -731,58 +699,22 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 		})
 
 		It("returns (true, failed) when archive-check init container exited non-zero", func() {
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "archive-check-fail-pod",
-					Namespace: lsTestNamespace,
-					Labels:    map[string]string{"app": lsDepName},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
-				},
-			}
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-
-			patch := client.MergeFrom(pod.DeepCopy())
-			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
-				{
-					Name: "litestream-archive-check",
-					State: corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
-					},
-				},
-			}
-			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
-
+			pod := createTestPod(ctx, "archive-check-fail-pod", lsTestNamespace, lsDepName)
+			patchInitContainerStatuses(ctx, pod, []corev1.ContainerStatus{{
+				Name:  "litestream-archive-check",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+			}})
 			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
 			Expect(failed).To(BeTrue())
 			Expect(msg).To(ContainSubstring("archive check failed"))
 		})
 
 		It("returns (false, passed) when archive-check init container exited zero", func() {
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "archive-check-pass-pod",
-					Namespace: lsTestNamespace,
-					Labels:    map[string]string{"app": lsDepName},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
-				},
-			}
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-
-			patch := client.MergeFrom(pod.DeepCopy())
-			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
-				{
-					Name: "litestream-archive-check",
-					State: corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
-					},
-				},
-			}
-			Expect(k8sClient.Status().Patch(ctx, pod, patch)).To(Succeed())
-
+			pod := createTestPod(ctx, "archive-check-pass-pod", lsTestNamespace, lsDepName)
+			patchInitContainerStatuses(ctx, pod, []corev1.ContainerStatus{{
+				Name:  "litestream-archive-check",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+			}})
 			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
 			Expect(failed).To(BeFalse())
 			Expect(msg).To(Equal("archive check passed"))
