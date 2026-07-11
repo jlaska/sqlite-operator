@@ -23,6 +23,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sigsyaml "sigs.k8s.io/yaml"
+
+	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 )
 
 // All integration scenarios run in a single Ordered container so Ginkgo's
@@ -515,56 +519,48 @@ spec:
 }
 
 func sqliteDBManifest(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string) string {
-	backup := ""
+	db := &databasev1.SQLiteDB{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "database.example.com/v1", Kind: "SQLiteDB"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: databasev1.SQLiteDBSpec{
+			DatabaseName:     dbFile,
+			DatabasePath:     dbPath,
+			TargetDeployment: target,
+			InitSQL:          initSQL,
+		},
+	}
 	if backupEnabled {
-		backup = fmt.Sprintf(`
-  backup:
-    enabled: true
-    destination:
-      s3:
-        endpoint: %s
-        bucket: %s
-        path: %s/
-        secretRef: minio-creds
-    retention:
-      duration: "720h"`, minioEndpoint, minioBucket, name)
-	}
-
-	initSQLBlock := ""
-	if initSQL != "" {
-		lines := strings.Split(initSQL, "\n")
-		indented := make([]string, len(lines))
-		for i, l := range lines {
-			indented[i] = "    " + l
+		db.Spec.Backup = databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{
+					Endpoint:  minioEndpoint,
+					Bucket:    minioBucket,
+					Path:      name + "/",
+					SecretRef: "minio-creds",
+				},
+			},
+			Retention: databasev1.RetentionPolicy{Duration: "720h"},
 		}
-		initSQLBlock = "\n  initSQL: |\n" + strings.Join(indented, "\n")
 	}
-
-	return fmt.Sprintf(`
-apiVersion: database.example.com/v1
-kind: SQLiteDB
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  databaseName: %s
-  databasePath: %s
-  targetDeployment: %s%s%s
-`, name, ns, dbFile, dbPath, target, backup, initSQLBlock)
+	data, err := sigsyaml.Marshal(db)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return string(data)
 }
 
 func sqliteRestoreManifest(name, ns, sourceRef, pvc, targetPath string) string {
-	return fmt.Sprintf(`
-apiVersion: database.example.com/v1
-kind: SQLiteRestore
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  sourceRef: %s
-  targetPVC: %s
-  targetPath: %s
-`, name, ns, sourceRef, pvc, targetPath)
+	restore := &databasev1.SQLiteRestore{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "database.example.com/v1", Kind: "SQLiteRestore"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: databasev1.SQLiteRestoreSpec{
+			SourceRef:  sourceRef,
+			TargetPVC:  pvc,
+			TargetPath: targetPath,
+		},
+	}
+	data, err := sigsyaml.Marshal(restore)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return string(data)
 }
 
 func verifyRestoreJobManifest(name, ns, pvc, dbPath string) string {
@@ -617,26 +613,13 @@ func runningPod(deploymentName string) string {
 	return podName
 }
 
-// mcList runs `mc ls` against the MinIO service using a one-shot pod.
+// mcList runs `mc ls` against the MinIO service using the persistent mc-client pod.
 // Returns the listing output on success, empty string on any error.
+// The mc alias is pre-configured in BeforeSuite so no setup is needed here.
 func mcList(path string) string {
-	podName := fmt.Sprintf("mc-ls-%d", time.Now().UnixMilli())
-	// --command overrides the mc image's entrypoint so /bin/sh is the process,
-	// not an arg passed to mc. Without it kubectl run appends /bin/sh as an
-	// argument to mc, producing: mc /bin/sh -c "..." which fails.
-	out, err := runCmd("kubectl", "run", podName,
-		"--restart=Never",
-		"--rm",
-		"--attach",
-		"-n", testNamespace,
-		"--image=quay.io/minio/mc:latest",
-		"--command",
-		"--",
+	out, err := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
 		"/bin/sh", "-c",
-		fmt.Sprintf(
-			"mc alias set local http://minio:9000 %s %s > /dev/null 2>&1 && mc ls local/%s 2>/dev/null",
-			minioUser, minioPass, path,
-		),
+		fmt.Sprintf("mc ls local/%s 2>/dev/null", path),
 	)
 	if err != nil {
 		return ""

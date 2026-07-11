@@ -23,7 +23,6 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,125 +40,109 @@ var _ = Describe("SQLiteDB Controller", func() {
 		namespaceName  = "default"
 		databaseName   = "myapp.db"
 		databasePath   = "/data"
-		appLabel       = "app" // goconst: used as label key in test Deployment
+		appLabel       = "app"
 	)
 
 	ctx := context.Background()
 	namespacedName := types.NamespacedName{Name: resourceName, Namespace: namespaceName}
 	deploymentKey := types.NamespacedName{Name: deploymentName, Namespace: namespaceName}
-
-	newReconciler := func() *SQLiteDBReconciler {
-		return &SQLiteDBReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: record.NewFakeRecorder(10),
-		}
-	}
+	cmKey := types.NamespacedName{Name: resourceName + "-litestream", Namespace: namespaceName}
 
 	BeforeEach(func() {
-		dep := &appsv1.Deployment{}
-		err := k8sClient.Get(ctx, deploymentKey, dep)
-		if err != nil && errors.IsNotFound(err) {
-			dep = &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: namespaceName},
-				Spec: appsv1.DeploymentSpec{
-					Selector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{appLabel: deploymentName},
-					},
-					Template: corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: deploymentName}},
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
-						},
+		dep := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: namespaceName},
+			Spec: appsv1.DeploymentSpec{
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{appLabel: deploymentName},
+				},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: deploymentName}},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
 					},
 				},
-			}
-			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			},
 		}
+		Expect(k8sClient.Create(ctx, dep)).To(Succeed())
 
-		db := &databasev1.SQLiteDB{}
-		err = k8sClient.Get(ctx, namespacedName, db)
-		if err != nil && errors.IsNotFound(err) {
-			db = &databasev1.SQLiteDB{
-				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespaceName},
-				Spec: databasev1.SQLiteDBSpec{
-					DatabaseName:     databaseName,
-					DatabasePath:     databasePath,
-					TargetDeployment: deploymentName,
-					Backup:           databasev1.BackupSpec{Enabled: false},
-				},
-			}
-			Expect(k8sClient.Create(ctx, db)).To(Succeed())
+		db := &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespaceName},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:     databaseName,
+				DatabasePath:     databasePath,
+				TargetDeployment: deploymentName,
+				Backup:           databasev1.BackupSpec{Enabled: false},
+			},
 		}
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
 	})
 
 	AfterEach(func() {
+		// Delete ConfigMaps explicitly — envtest does not GC owned objects.
+		for _, name := range []string{resourceName + "-litestream", resourceName + "-init-sql"} {
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespaceName}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
+		}
 		db := &databasev1.SQLiteDB{}
-		err := k8sClient.Get(ctx, namespacedName, db)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
-
+		if err := k8sClient.Get(ctx, namespacedName, db); err == nil {
+			Expect(k8sClient.Delete(ctx, db)).To(Succeed())
+		}
 		dep := &appsv1.Deployment{}
-		err = k8sClient.Get(ctx, deploymentKey, dep)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Delete(ctx, dep)).To(Succeed())
-	})
-
-	It("should reconcile without error", func() {
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-		Expect(err).NotTo(HaveOccurred())
+		if err := k8sClient.Get(ctx, deploymentKey, dep); err == nil {
+			Expect(k8sClient.Delete(ctx, dep)).To(Succeed())
+		}
 	})
 
 	It("should create the Litestream ConfigMap", func() {
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-		Expect(err).NotTo(HaveOccurred())
-
-		cm := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{
-			Name:      resourceName + "-litestream",
-			Namespace: namespaceName,
-		}, cm)).To(Succeed())
-		Expect(cm.Data).To(HaveKey("litestream.yml"))
-		Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+		Eventually(func(g Gomega) {
+			cm := &corev1.ConfigMap{}
+			g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			g.Expect(cm.Data).To(HaveKey("litestream.yml"))
+			g.Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+		}).Should(Succeed())
 	})
 
 	It("should annotate the target Deployment's pod template", func() {
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-		Expect(err).NotTo(HaveOccurred())
-
-		dep := &appsv1.Deployment{}
-		Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
-		Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(injectAnnotation, "true"))
-		Expect(dep.Spec.Template.Annotations).To(HaveKey(configAnnotation))
-		// Label mirrors annotation so the webhook objectSelector fires.
-		Expect(dep.Spec.Template.Labels).To(HaveKeyWithValue(injectAnnotation, "true"))
+		Eventually(func(g Gomega) {
+			dep := &appsv1.Deployment{}
+			g.Expect(k8sClient.Get(ctx, deploymentKey, dep)).To(Succeed())
+			g.Expect(dep.Spec.Template.Annotations).To(HaveKeyWithValue(injectAnnotation, "true"))
+			g.Expect(dep.Spec.Template.Annotations).To(HaveKey(configAnnotation))
+			g.Expect(dep.Spec.Template.Labels).To(HaveKeyWithValue(injectAnnotation, "true"))
+		}).Should(Succeed())
 	})
 
 	It("should set SidecarInjected condition after annotation", func() {
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-		Expect(err).NotTo(HaveOccurred())
-
-		db := &databasev1.SQLiteDB{}
-		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-		cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionSidecarInjected)
-		Expect(cond).NotTo(BeNil())
-		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Eventually(func(g Gomega) {
+			db := &databasev1.SQLiteDB{}
+			g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionSidecarInjected)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		}).Should(Succeed())
 	})
 
 	It("should set BackupHealthy condition to False when backup is disabled", func() {
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-		Expect(err).NotTo(HaveOccurred())
-
-		db := &databasev1.SQLiteDB{}
-		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-		cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionBackupHealthy)
-		Expect(cond).NotTo(BeNil())
-		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-		Expect(cond.Reason).To(Equal("BackupDisabled"))
+		Eventually(func(g Gomega) {
+			db := &databasev1.SQLiteDB{}
+			g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionBackupHealthy)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(Equal("BackupDisabled"))
+		}).Should(Succeed())
 	})
 
 	It("should set BackupHealthy to False when no Litestream pods exist yet", func() {
-		// Update the CR to enable backup.
+		// Wait for initial reconcile, then enable backup.
+		Eventually(func(g Gomega) {
+			db := &databasev1.SQLiteDB{}
+			g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			g.Expect(db.Status.Conditions).NotTo(BeEmpty())
+		}).Should(Succeed())
+
 		db := &databasev1.SQLiteDB{}
 		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 		db.Spec.Backup = databasev1.BackupSpec{
@@ -170,25 +153,37 @@ var _ = Describe("SQLiteDB Controller", func() {
 		}
 		Expect(k8sClient.Update(ctx, db)).To(Succeed())
 
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-		cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionBackupHealthy)
-		Expect(cond).NotTo(BeNil())
-		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-		// No pods exist yet in envtest, so the reason should be SidecarUnhealthy.
-		Expect(cond.Reason).To(Equal("SidecarUnhealthy"))
+		Eventually(func(g Gomega) {
+			db := &databasev1.SQLiteDB{}
+			g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionBackupHealthy)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(Equal("SidecarUnhealthy"))
+		}).Should(Succeed())
 	})
 
 	It("should requeue after the status sync interval", func() {
-		result, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+		// Call Reconcile directly to inspect the return value — the manager itself
+		// does not expose its RequeueAfter, so this tests the contract directly.
+		r := &SQLiteDBReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: record.NewFakeRecorder(1),
+		}
+		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(Equal(statusSyncInterval))
 	})
 
 	Context("replication pause", func() {
 		It("produces empty dbs config when pause annotation is set", func() {
+			// Wait for the manager to create the initial ConfigMap.
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			}).Should(Succeed())
+
 			db := &databasev1.SQLiteDB{}
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 			if db.Annotations == nil {
@@ -197,29 +192,29 @@ var _ = Describe("SQLiteDB Controller", func() {
 			db.Annotations[databasev1.AnnotationPause] = "true"
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
 
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: resourceName + "-litestream", Namespace: namespaceName,
-			}, cm)).To(Succeed())
-			Expect(cm.Data["litestream.yml"]).To(Equal("dbs: []\n"))
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+				g.Expect(cm.Data["litestream.yml"]).To(Equal("dbs: []\n"))
+			}).Should(Succeed())
 		})
 
 		It("produces normal config when pause annotation is absent", func() {
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: resourceName + "-litestream", Namespace: namespaceName,
-			}, cm)).To(Succeed())
-			Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
-			Expect(cm.Data["litestream.yml"]).NotTo(Equal("dbs: []\n"))
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+				g.Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+				g.Expect(cm.Data["litestream.yml"]).NotTo(Equal("dbs: []\n"))
+			}).Should(Succeed())
 		})
 
 		It("reverts config to normal after pause annotation is removed", func() {
+			// Wait for initial ConfigMap.
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			}).Should(Succeed())
+
 			// Set pause.
 			db := &databasev1.SQLiteDB{}
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
@@ -228,29 +223,31 @@ var _ = Describe("SQLiteDB Controller", func() {
 			}
 			db.Annotations[databasev1.AnnotationPause] = "true"
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
 
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: resourceName + "-litestream", Namespace: namespaceName,
-			}, cm)).To(Succeed())
-			Expect(cm.Data["litestream.yml"]).To(Equal("dbs: []\n"))
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+				g.Expect(cm.Data["litestream.yml"]).To(Equal("dbs: []\n"))
+			}).Should(Succeed())
 
 			// Remove pause.
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 			delete(db.Annotations, databasev1.AnnotationPause)
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
-			_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
 
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: resourceName + "-litestream", Namespace: namespaceName,
-			}, cm)).To(Succeed())
-			Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+				g.Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+			}).Should(Succeed())
 		})
 
 		It("sets ReplicationPaused condition to True when pause annotation is set", func() {
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			}).Should(Succeed())
+
 			db := &databasev1.SQLiteDB{}
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 			if db.Annotations == nil {
@@ -259,29 +256,33 @@ var _ = Describe("SQLiteDB Controller", func() {
 			db.Annotations[databasev1.AnnotationPause] = "true"
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
 
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionReplicationPaused)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal("PauseAnnotationSet"))
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionReplicationPaused)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal("PauseAnnotationSet"))
+			}).Should(Succeed())
 		})
 
 		It("sets ReplicationPaused condition to False when pause annotation is absent", func() {
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			db := &databasev1.SQLiteDB{}
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionReplicationPaused)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("ReplicationActive"))
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionReplicationPaused)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("ReplicationActive"))
+			}).Should(Succeed())
 		})
 
 		It("sets phase to Paused when pause annotation is set", func() {
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			}).Should(Succeed())
+
 			db := &databasev1.SQLiteDB{}
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 			if db.Annotations == nil {
@@ -290,14 +291,19 @@ var _ = Describe("SQLiteDB Controller", func() {
 			db.Annotations[databasev1.AnnotationPause] = "true"
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
 
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			Expect(db.Status.Phase).To(Equal(databasev1.PhasePaused))
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				g.Expect(db.Status.Phase).To(Equal(databasev1.PhasePaused))
+			}).Should(Succeed())
 		})
 
 		It("reverts phase from Paused when pause annotation is removed", func() {
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			}).Should(Succeed())
+
 			// Set pause.
 			db := &databasev1.SQLiteDB{}
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
@@ -306,21 +312,22 @@ var _ = Describe("SQLiteDB Controller", func() {
 			}
 			db.Annotations[databasev1.AnnotationPause] = "true"
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			Expect(db.Status.Phase).To(Equal(databasev1.PhasePaused))
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				g.Expect(db.Status.Phase).To(Equal(databasev1.PhasePaused))
+			}).Should(Succeed())
 
 			// Remove pause.
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 			delete(db.Annotations, databasev1.AnnotationPause)
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
-			_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
 
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			Expect(db.Status.Phase).NotTo(Equal(databasev1.PhasePaused))
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				g.Expect(db.Status.Phase).NotTo(Equal(databasev1.PhasePaused))
+			}).Should(Succeed())
 		})
 	})
 
@@ -333,14 +340,13 @@ var _ = Describe("SQLiteDB Controller", func() {
 			db.Spec.InitSQL = initSQL
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
 
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: resourceName + "-init-sql", Namespace: namespaceName,
-			}, cm)).To(Succeed())
-			Expect(cm.Data["init.sql"]).To(Equal(initSQL))
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name: resourceName + "-init-sql", Namespace: namespaceName,
+				}, cm)).To(Succeed())
+				g.Expect(cm.Data["init.sql"]).To(Equal(initSQL))
+			}).Should(Succeed())
 		})
 
 		It("records the SHA-256 hash in status.InitSQLHash", func() {
@@ -349,11 +355,11 @@ var _ = Describe("SQLiteDB Controller", func() {
 			db.Spec.InitSQL = initSQL
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
 
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(initSQL)))
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				g.Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(initSQL)))
+			}).Should(Succeed())
 		})
 
 		It("updates the ConfigMap and hash when InitSQL changes", func() {
@@ -361,25 +367,30 @@ var _ = Describe("SQLiteDB Controller", func() {
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 			db.Spec.InitSQL = initSQL
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				g.Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(initSQL)))
+			}).Should(Succeed())
 
 			// Change the SQL.
 			newSQL := initSQL + "\nCREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY);"
 			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
 			db.Spec.InitSQL = newSQL
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
-			_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
 
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: resourceName + "-init-sql", Namespace: namespaceName,
-			}, cm)).To(Succeed())
-			Expect(cm.Data["init.sql"]).To(Equal(newSQL))
+			Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name: resourceName + "-init-sql", Namespace: namespaceName,
+				}, cm)).To(Succeed())
+				g.Expect(cm.Data["init.sql"]).To(Equal(newSQL))
 
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(newSQL)))
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				g.Expect(db.Status.InitSQLHash).To(Equal(initSQLHash(newSQL)))
+			}).Should(Succeed())
 		})
 
 		It("sets InitSQLApplied condition to True when ConfigMap is ready", func() {
@@ -388,14 +399,14 @@ var _ = Describe("SQLiteDB Controller", func() {
 			db.Spec.InitSQL = initSQL
 			Expect(k8sClient.Update(ctx, db)).To(Succeed())
 
-			_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
-			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionInitSQLApplied)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal("ConfigMapReady"))
+			Eventually(func(g Gomega) {
+				db := &databasev1.SQLiteDB{}
+				g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+				cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionInitSQLApplied)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal("ConfigMapReady"))
+			}).Should(Succeed())
 		})
 	})
 })

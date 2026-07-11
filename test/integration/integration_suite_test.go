@@ -74,6 +74,16 @@ var _ = BeforeSuite(func() {
 		"--from-literal=ACCESS_KEY_ID="+minioUser,
 		"--from-literal=SECRET_ACCESS_KEY="+minioPass,
 	)
+
+	By("starting persistent mc client pod")
+	applyLiteral(mcClientPodManifest())
+	kubectl("wait", "-n", testNamespace, "pod/mc-client",
+		"--for=condition=Ready", "--timeout=2m")
+	// Pre-configure the mc alias so mcList() calls can skip it.
+	kubectl("exec", "-n", testNamespace, "mc-client", "--",
+		"/bin/sh", "-c",
+		fmt.Sprintf("mc alias set local http://minio:9000 %s %s > /dev/null 2>&1", minioUser, minioPass),
+	)
 })
 
 var _ = AfterSuite(func() {
@@ -183,6 +193,22 @@ spec:
       port: 9000
       targetPort: 9000
 `, testNamespace, testNamespace, minioUser, minioPass, testNamespace)
+}
+
+func mcClientPodManifest() string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mc-client
+  namespace: %s
+spec:
+  restartPolicy: Never
+  containers:
+    - name: mc
+      image: quay.io/minio/mc:latest
+      command: ["sleep", "infinity"]
+`, testNamespace)
 }
 
 func createBucketJobManifest() string {

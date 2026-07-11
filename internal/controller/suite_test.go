@@ -27,10 +27,12 @@ import (
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 	// +kubebuilder:scaffold:imports
@@ -83,6 +85,25 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	By("starting controller manager with SQLiteDBReconciler")
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:         scheme.Scheme,
+		Metrics:        metricsserver.Options{BindAddress: "0"},
+		LeaderElection: false,
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	Expect((&SQLiteDBReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("sqlitedb-controller"),
+	}).SetupWithManager(mgr)).To(Succeed())
+
+	go func() {
+		defer GinkgoRecover()
+		Expect(mgr.Start(ctx)).To(Succeed())
+	}()
 })
 
 var _ = AfterSuite(func() {

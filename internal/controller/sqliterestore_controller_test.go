@@ -134,15 +134,11 @@ var _ = Describe("SQLiteRestore Controller", func() {
 			Expect(k8sClient.Create(ctx, newSourceDB())).To(Succeed())
 		}
 
-		// Create the Litestream ConfigMap (normally created by SQLiteDBReconciler).
-		cm := &corev1.ConfigMap{}
-		if err := k8sClient.Get(ctx, sourceConfigMapKey, cm); err != nil && errors.IsNotFound(err) {
-			cm = &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Name: sourceDBName + "-litestream", Namespace: namespaceName},
-				Data:       map[string]string{"litestream.yml": "dbs: []\n"},
-			}
-			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
-		}
+		// Wait for SQLiteDBReconciler to create the Litestream ConfigMap.
+		Eventually(func(g Gomega) {
+			cm := &corev1.ConfigMap{}
+			g.Expect(k8sClient.Get(ctx, sourceConfigMapKey, cm)).To(Succeed())
+		}).Should(Succeed())
 
 		restore := &databasev1.SQLiteRestore{}
 		if err := k8sClient.Get(ctx, restoreKey, restore); err != nil && errors.IsNotFound(err) {
@@ -161,9 +157,12 @@ var _ = Describe("SQLiteRestore Controller", func() {
 			Expect(k8sClient.Delete(ctx, db)).To(Succeed())
 		}
 
-		cm := &corev1.ConfigMap{}
-		if err := k8sClient.Get(ctx, sourceConfigMapKey, cm); err == nil {
-			Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
+		// Explicitly delete ConfigMaps — envtest does not GC owned objects.
+		for _, cmName := range []string{sourceDBName + "-litestream", sourceDBName + "-init-sql"} {
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: cmName, Namespace: namespaceName}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
 		}
 
 		dep := &appsv1.Deployment{}
@@ -430,13 +429,13 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		}
 		Expect(k8sClient.Create(ctx, db)).To(Succeed())
 
-		// Create the ConfigMap that reconcilePausing checks (normally created by SQLiteDBReconciler).
-		// We create it with the full config; tests that simulate the pause will update it to dbs: [].
-		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: dbName + "-litestream", Namespace: namespaceName},
-			Data:       map[string]string{"litestream.yml": "dbs:\n  - path: /data/myapp.db\n"},
-		}
-		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+		// Wait for SQLiteDBReconciler to create the Litestream ConfigMap.
+		Eventually(func(g Gomega) {
+			cm := &corev1.ConfigMap{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: dbName + "-litestream", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+		}).Should(Succeed())
 
 		restore := &databasev1.SQLiteRestore{
 			ObjectMeta: metav1.ObjectMeta{Name: restoreName, Namespace: namespaceName},
@@ -460,11 +459,14 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		if err := k8sClient.Get(ctx, dbKey, db); err == nil {
 			_ = k8sClient.Delete(ctx, db)
 		}
-		cm := &corev1.ConfigMap{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{
-			Name: dbKey.Name + "-litestream", Namespace: namespaceName,
-		}, cm); err == nil {
-			_ = k8sClient.Delete(ctx, cm)
+		// Explicitly delete ConfigMaps — envtest does not GC owned objects.
+		for _, suffix := range []string{"-litestream", "-init-sql"} {
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{
+				Name: dbKey.Name + suffix, Namespace: namespaceName,
+			}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
 		}
 		dep := &appsv1.Deployment{}
 		if err := k8sClient.Get(ctx, deployKey, dep); err == nil {
@@ -860,15 +862,21 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, db)).To(Succeed())
-		defer func() { _ = k8sClient.Delete(ctx, db) }()
+		defer func() {
+			_ = k8sClient.Delete(ctx, db)
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: dbName + "-litestream", Namespace: namespaceName}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
+		}()
 
-		// Create the ConfigMap that Pausing phase checks.
-		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: dbName + "-litestream", Namespace: namespaceName},
-			Data:       map[string]string{"litestream.yml": "dbs: []\n"},
-		}
-		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
-		defer func() { _ = k8sClient.Delete(ctx, cm) }()
+		// Wait for SQLiteDBReconciler to create the Litestream ConfigMap.
+		Eventually(func(g Gomega) {
+			cm := &corev1.ConfigMap{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: dbName + "-litestream", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+		}).Should(Succeed())
 
 		restore := &databasev1.SQLiteRestore{
 			ObjectMeta: metav1.ObjectMeta{Name: restoreName, Namespace: namespaceName},
