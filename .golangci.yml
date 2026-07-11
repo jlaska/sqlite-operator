@@ -29,3 +29,6 @@ linters:
           - revive
         text: "dot-imports"
         path: test/
+      - linters:
+          - goconst
+        path: _test\.go$

@@ -54,6 +54,12 @@ const (
 	skipArchiveAnnotation = databasev1.AnnotationSkipArchiveCheck
 )
 
+const (
+	injectEnabled    = "true"
+	pausedConfig     = "dbs: []\n"
+	litestreamSidecar = "litestream"
+)
+
 // SQLiteDBReconciler reconciles a SQLiteDB object
 type SQLiteDBReconciler struct {
 	client.Client
@@ -119,8 +125,8 @@ func (r *SQLiteDBReconciler) reconcileLitestreamConfig(ctx context.Context, sqli
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
 		var config string
-		if sqliteDB.Annotations[pauseAnnotation] == "true" {
-			config = "dbs: []\n"
+		if sqliteDB.Annotations[pauseAnnotation] == injectEnabled {
+			config = pausedConfig
 		} else {
 			config = r.buildLitestreamConfig(sqliteDB)
 		}
@@ -252,8 +258,6 @@ func (r *SQLiteDBReconciler) reconcileTargetAnnotation(ctx context.Context, sqli
 
 	configRef := fmt.Sprintf("%s/%s", sqliteDB.Namespace, sqliteDB.Name)
 
-	const injectEnabled = "true"
-
 	tmplAnnotations := deployment.Spec.Template.Annotations
 	tmplLabels := deployment.Spec.Template.Labels
 	// Both annotation and label must be present: the annotation carries the
@@ -306,7 +310,7 @@ func (r *SQLiteDBReconciler) litestreamContainerState(ctx context.Context, sqlit
 	for i := range podList.Items {
 		pod := &podList.Items[i]
 		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Name != "litestream" {
+			if cs.Name != litestreamSidecar {
 				continue
 			}
 			noneFound = false
@@ -376,7 +380,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 	}
 
 	// --- ReplicationPaused condition ---
-	isPaused := sqliteDB.Annotations[pauseAnnotation] == "true"
+	isPaused := sqliteDB.Annotations[pauseAnnotation] == injectEnabled
 	if isPaused {
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReplicationPaused,
 			metav1.ConditionTrue, "PauseAnnotationSet",
@@ -404,7 +408,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 	}
 
 	// --- SidecarInjected condition ---
-	annotated := deployment.Spec.Template.Annotations[injectAnnotation] == "true"
+	annotated := deployment.Spec.Template.Annotations[injectAnnotation] == injectEnabled
 	if annotated {
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionSidecarInjected,
 			metav1.ConditionTrue, "Annotated",

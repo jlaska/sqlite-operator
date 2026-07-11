@@ -152,7 +152,7 @@ func (r *SQLiteRestoreReconciler) reconcilePausing(ctx context.Context, restore 
 	log := logf.FromContext(ctx)
 
 	// Verify pause annotation is still set (defensive — could have been removed).
-	if sourceDB.Annotations[pauseAnnotation] != "true" {
+	if sourceDB.Annotations[pauseAnnotation] != injectEnabled {
 		if err := r.pauseReplication(ctx, sourceDB); err != nil {
 			return ctrl.Result{}, fmt.Errorf("re-setting pause annotation: %w", err)
 		}
@@ -168,7 +168,7 @@ func (r *SQLiteRestoreReconciler) reconcilePausing(ctx context.Context, restore 
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval},
 			fmt.Errorf("getting litestream ConfigMap: %w", err)
 	}
-	if cm.Data["litestream.yml"] != "dbs: []\n" {
+	if cm.Data["litestream.yml"] != pausedConfig {
 		log.Info("Waiting for ConfigMap to reflect pause")
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 	}
@@ -343,20 +343,20 @@ func (r *SQLiteRestoreReconciler) failRestoreWithCleanup(ctx context.Context, re
 
 // pauseReplication sets the pause annotation on the SQLiteDB CR.
 func (r *SQLiteRestoreReconciler) pauseReplication(ctx context.Context, db *databasev1.SQLiteDB) error {
-	if db.Annotations[pauseAnnotation] == "true" {
+	if db.Annotations[pauseAnnotation] == injectEnabled {
 		return nil // already paused
 	}
 	patch := client.MergeFrom(db.DeepCopy())
 	if db.Annotations == nil {
 		db.Annotations = map[string]string{}
 	}
-	db.Annotations[pauseAnnotation] = "true"
+	db.Annotations[pauseAnnotation] = injectEnabled
 	return r.Patch(ctx, db, patch)
 }
 
 // resumeReplication removes the pause annotation from the SQLiteDB CR.
 func (r *SQLiteRestoreReconciler) resumeReplication(ctx context.Context, db *databasev1.SQLiteDB) error {
-	if db.Annotations[pauseAnnotation] != "true" {
+	if db.Annotations[pauseAnnotation] != injectEnabled {
 		return nil // not paused
 	}
 	// Re-fetch to get the latest version before patching.
