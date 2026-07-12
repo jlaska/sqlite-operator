@@ -316,5 +316,63 @@ var _ = Describe("SQLiteDBValidator", func() {
 			_, err := v.ValidateCreate(ctx, db)
 			Expect(err).NotTo(HaveOccurred())
 		})
+
+		It("accepts targetDeployment with nil spec.Replicas (defaults to 1)", func() { //nolint:dupl
+			const depName = "nil-replicas-dep"
+			dep := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: "default"},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: nil, // nil → Kubernetes defaults to 1
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": depName},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": depName}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			db := newValidDB()
+			db.Spec.TargetDeployment = depName
+			v := &webhook.SQLiteDBValidator{Client: k8sClient}
+			_, err := v.ValidateCreate(ctx, db)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("accepts targetStatefulSet with nil spec.Replicas (defaults to 1)", func() { //nolint:dupl
+			const stsName = "nil-replicas-sts"
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: stsName, Namespace: "default"},
+				Spec: appsv1.StatefulSetSpec{
+					Replicas: nil, // nil → Kubernetes defaults to 1
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": stsName},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": stsName}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sts) }()
+
+			db := newValidDBWithStatefulSet()
+			db.Spec.TargetStatefulSet = stsName
+			v := &webhook.SQLiteDBValidator{Client: k8sClient}
+			_, err := v.ValidateCreate(ctx, db)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("accepts targetStatefulSet that does not yet exist (defers check to reconciler)", func() {
+			db := newValidDBWithStatefulSet()
+			db.Spec.TargetStatefulSet = "nonexistent-sts"
+			v := &webhook.SQLiteDBValidator{Client: k8sClient}
+			_, err := v.ValidateCreate(ctx, db)
+			Expect(err).NotTo(HaveOccurred())
+		})
 	})
 })

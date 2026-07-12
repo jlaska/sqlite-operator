@@ -27,6 +27,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -143,6 +144,24 @@ var _ = Describe("SidecarInjector", func() {
 	It("allows pods without the injection annotation", func() {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "plain-pod", Namespace: namespace},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: appContainerImage}},
+			},
+		}
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeTrue())
+		Expect(resp.Patches).To(BeEmpty())
+	})
+
+	It("allows and no-ops when inject annotation is set but config annotation is absent", func() {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "no-config-pod", Namespace: namespace,
+				Annotations: map[string]string{
+					databasev1.AnnotationInject: injectTrue,
+					// No AnnotationConfig — resolveSQLiteDB returns nil.
+				},
+			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "app", Image: appContainerImage}},
 			},
@@ -299,6 +318,37 @@ var _ = Describe("SidecarInjector", func() {
 		}
 		Expect(found).To(BeTrue(), "expected LITESTREAM_LOG_LEVEL=debug env var")
 	})
+
+	It("uses custom resource requirements when spec.backup.resources is set", func() {
+		db := &databasev1.SQLiteDB{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
+
+		dbWithResources := newSQLiteDB(false)
+		cpuLimit := "50m"
+		dbWithResources.Spec.Backup.Resources = &corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse(cpuLimit),
+			},
+		}
+		Expect(k8sClient.Create(ctx, dbWithResources)).To(Succeed())
+
+		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyPatches(pod, resp.Patches)
+		var sidecar corev1.Container
+		for _, c := range patched.Spec.Containers {
+			if c.Name == litestreamName {
+				sidecar = c
+				break
+			}
+		}
+		// Should use the custom CPU limit, not the default ephemeral-storage limit.
+		Expect(sidecar.Resources.Limits).To(HaveKey(corev1.ResourceCPU))
+		Expect(sidecar.Resources.Limits).NotTo(HaveKey(corev1.ResourceEphemeralStorage))
+	})
 })
 
 var _ = Describe("SidecarInjector init container", func() {
@@ -438,6 +488,45 @@ var _ = Describe("SidecarInjector init container", func() {
 
 		patched := applyInitPatches(pod, resp.Patches)
 		Expect(patched.Spec.InitContainers).To(BeEmpty())
+	})
+
+	It("uses custom InitImage when spec.initImage is set", func() {
+		const customInitImage = "my-org/sqlite3-custom:v1.2"
+
+		// Replace the default DB with one that has a custom initImage.
+		existing := &databasev1.SQLiteDB{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, existing)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, existing)).To(Succeed())
+
+		customDB := &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: sqliteDBName, Namespace: namespace},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:     databaseName,
+				DatabasePath:     databasePath,
+				TargetDeployment: deployName,
+				InitSQL:          initSQL,
+				InitImage:        customInitImage,
+			},
+		}
+		Expect(k8sClient.Create(ctx, customDB)).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + sqliteDBName,
+		}
+		pod := newPod(annotations)
+		resp := newInjector().Handle(ctx, makePodRequest(pod))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyInitPatches(pod, resp.Patches)
+		var initContainer corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "sqlite-init" {
+				initContainer = c
+				break
+			}
+		}
+		Expect(initContainer.Image).To(Equal(customInitImage))
 	})
 })
 
@@ -711,6 +800,28 @@ var _ = Describe("SidecarInjector archive check", func() {
 		}
 		Expect(archiveCheck.Image).To(Equal(sidecar.Image))
 		Expect(archiveCheck.Image).To(Equal(customImage))
+	})
+
+	It("does not inject any startup init container when backup enabled, autoRestore=false, skip-archive-check=true", func() {
+		annotations := map[string]string{
+			databasev1.AnnotationSkipArchiveCheck: "true",
+		}
+		db := newBackupDB(annotations)
+		db.Spec.Backup.AutoRestore = false
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+
+		podAnnotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(podAnnotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(podAnnotations), resp.Patches)
+		for _, c := range patched.Spec.InitContainers {
+			Expect(c.Name).NotTo(Equal("litestream-archive-check"))
+			Expect(c.Name).NotTo(Equal("litestream-restore"))
+		}
 	})
 })
 
@@ -1018,6 +1129,24 @@ var _ = Describe("SidecarInjector error paths", func() {
 					Image: appContainerImage,
 					// No VolumeMounts at all.
 				}},
+			},
+		}
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Code).To(BeNumerically("==", 500))
+	})
+
+	It("returns an error when the pod has no containers at all", func() {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "err-pod-no-containers", Namespace: namespace,
+				Annotations: map[string]string{
+					databasev1.AnnotationInject: "true",
+					databasev1.AnnotationConfig: namespace + "/" + errDBName,
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{}, // zero containers
 			},
 		}
 		resp := newInjector().Handle(ctx, makeRequest(pod))
