@@ -22,7 +22,7 @@ jobs:
       - name: Running Tests
         run: |
           go mod tidy
-          go test ./internal/... -coverprofile=./cover.out -covermode=atomic -coverpkg=./internal/...
+          make test
 
       - name: Check coverage thresholds
         uses: vladopajic/go-test-coverage@v2
@@ -53,7 +53,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Generate coverage
-        run: go test ./internal/... -coverprofile=./cover.out -covermode=atomic -coverpkg=./internal/...
+        run: make test
 
       - name: Generate and push badge
         uses: vladopajic/go-test-coverage@v2
