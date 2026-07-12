@@ -550,6 +550,35 @@ var _ = Describe("buildLitestreamConfig", func() {
 		cfg := reconciler.buildLitestreamConfig(db)
 		Expect(cfg).To(ContainSubstring("retention: 168h"))
 	})
+
+	It("always includes addr: \":9090\" for Prometheus metrics", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{Enabled: false})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring(`addr: ":9090"`))
+	})
+
+	It("includes sync-interval when SyncInterval is set", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{Bucket: "b", SecretRef: "s"},
+			},
+			SyncInterval: "500ms",
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).To(ContainSubstring("sync-interval: 500ms"))
+	})
+
+	It("omits sync-interval when SyncInterval is not set", func() {
+		db := newDB("/data", "app.db", databasev1.BackupSpec{
+			Enabled: true,
+			Destination: databasev1.BackupDestination{
+				S3: &databasev1.S3Destination{Bucket: "b", SecretRef: "s"},
+			},
+		})
+		cfg := reconciler.buildLitestreamConfig(db)
+		Expect(cfg).NotTo(ContainSubstring("sync-interval"))
+	})
 })
 
 func createTestPod(ctx context.Context, name, namespace, appLabel string) *corev1.Pod {
@@ -645,7 +674,8 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 
 	Describe("litestreamContainerState", func() {
 		It("returns healthy=false when no pods exist", func() {
-			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, wt)
 			Expect(healthy).To(BeFalse())
 			Expect(msg).To(ContainSubstring("no pods with Litestream sidecar found"))
 		})
@@ -656,7 +686,8 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 				Name:  "litestream",
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
 			}})
-			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, wt)
 			Expect(healthy).To(BeTrue())
 			Expect(msg).To(ContainSubstring("running in 1 pod"))
 		})
@@ -667,7 +698,8 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 				Name:  "litestream",
 				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
 			}})
-			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, wt)
 			Expect(healthy).To(BeFalse())
 			Expect(msg).To(ContainSubstring("unhealthy"))
 		})
@@ -678,7 +710,8 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 				Name:  "litestream",
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
 			}})
-			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			healthy, msg := reconciler.litestreamContainerState(ctx, sqliteDB, wt)
 			Expect(healthy).To(BeFalse())
 			Expect(msg).To(ContainSubstring("unhealthy"))
 		})
@@ -687,13 +720,15 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 	Describe("archiveCheckState", func() {
 		It("returns (false, passed) when backup is disabled", func() {
 			sqliteDB.Spec.Backup.Enabled = false
-			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, wt)
 			Expect(failed).To(BeFalse())
 			Expect(msg).To(Equal("backup not enabled"))
 		})
 
 		It("returns (false, passed) when no pods exist", func() {
-			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, wt)
 			Expect(failed).To(BeFalse())
 			Expect(msg).To(Equal("archive check passed"))
 		})
@@ -704,7 +739,8 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 				Name:  "litestream-archive-check",
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
 			}})
-			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, wt)
 			Expect(failed).To(BeTrue())
 			Expect(msg).To(ContainSubstring("archive check failed"))
 		})
@@ -715,9 +751,145 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 				Name:  "litestream-archive-check",
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
 			}})
-			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, deployment)
+			wt := &workloadTarget{deployment: deployment}
+			failed, msg := reconciler.archiveCheckState(ctx, sqliteDB, wt)
 			Expect(failed).To(BeFalse())
 			Expect(msg).To(Equal("archive check passed"))
 		})
+	})
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// StatefulSet support tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+var _ = Describe("SQLiteDB Controller with StatefulSet target", func() {
+	const (
+		stsResourceName = "sts-sqlitedb"
+		stsName         = "sts-app"
+		namespaceName   = "default"
+		databaseName    = "myapp.db"
+		databasePath    = "/data"
+		appLabel        = "app"
+	)
+
+	ctx := context.Background()
+	namespacedName := types.NamespacedName{Name: stsResourceName, Namespace: namespaceName}
+	stsKey := types.NamespacedName{Name: stsName, Namespace: namespaceName}
+	cmKey := types.NamespacedName{Name: stsResourceName + "-litestream", Namespace: namespaceName}
+
+	BeforeEach(func() {
+		replicas := int32(1)
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: stsName, Namespace: namespaceName},
+			Spec: appsv1.StatefulSetSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{appLabel: stsName},
+				},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{appLabel: stsName}},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+
+		db := &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: stsResourceName, Namespace: namespaceName},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:      databaseName,
+				DatabasePath:      databasePath,
+				TargetStatefulSet: stsName,
+				Backup:            databasev1.BackupSpec{Enabled: false},
+			},
+		}
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		for _, name := range []string{stsResourceName + "-litestream", stsResourceName + "-init-sql"} {
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespaceName}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
+		}
+		db := &databasev1.SQLiteDB{}
+		if err := k8sClient.Get(ctx, namespacedName, db); err == nil {
+			Expect(k8sClient.Delete(ctx, db)).To(Succeed())
+		}
+		sts := &appsv1.StatefulSet{}
+		if err := k8sClient.Get(ctx, stsKey, sts); err == nil {
+			Expect(k8sClient.Delete(ctx, sts)).To(Succeed())
+		}
+	})
+
+	It("creates the Litestream ConfigMap for a StatefulSet target", func() {
+		Eventually(func(g Gomega) {
+			cm := &corev1.ConfigMap{}
+			g.Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
+			g.Expect(cm.Data).To(HaveKey("litestream.yml"))
+			g.Expect(cm.Data["litestream.yml"]).To(ContainSubstring(databasePath + "/" + databaseName))
+		}).Should(Succeed())
+	})
+
+	It("annotates the target StatefulSet pod template", func() {
+		Eventually(func(g Gomega) {
+			sts := &appsv1.StatefulSet{}
+			g.Expect(k8sClient.Get(ctx, stsKey, sts)).To(Succeed())
+			g.Expect(sts.Spec.Template.Annotations).To(HaveKeyWithValue(injectAnnotation, "true"))
+			g.Expect(sts.Spec.Template.Annotations).To(HaveKey(configAnnotation))
+			g.Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue(injectAnnotation, "true"))
+		}).Should(Succeed())
+	})
+
+	It("sets SidecarInjected condition after annotating StatefulSet", func() {
+		Eventually(func(g Gomega) {
+			db := &databasev1.SQLiteDB{}
+			g.Expect(k8sClient.Get(ctx, namespacedName, db)).To(Succeed())
+			cond := meta.FindStatusCondition(db.Status.Conditions, databasev1.ConditionSidecarInjected)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		}).Should(Succeed())
+	})
+})
+
+var _ = Describe("workloadTarget helpers", func() {
+	It("reports correct typeName for Deployment", func() {
+		wt := &workloadTarget{deployment: &appsv1.Deployment{}}
+		Expect(wt.typeName()).To(Equal("Deployment"))
+	})
+
+	It("reports correct typeName for StatefulSet", func() {
+		wt := &workloadTarget{statefulSet: &appsv1.StatefulSet{}}
+		Expect(wt.typeName()).To(Equal("StatefulSet"))
+	})
+
+	It("desiredReplicas defaults to 1 when spec.Replicas is nil (Deployment)", func() {
+		wt := &workloadTarget{deployment: &appsv1.Deployment{}}
+		Expect(wt.desiredReplicas()).To(Equal(int32(1)))
+	})
+
+	It("desiredReplicas defaults to 1 when spec.Replicas is nil (StatefulSet)", func() {
+		wt := &workloadTarget{statefulSet: &appsv1.StatefulSet{}}
+		Expect(wt.desiredReplicas()).To(Equal(int32(1)))
+	})
+
+	It("desiredReplicas reflects explicit replica count (Deployment)", func() {
+		replicas := int32(3)
+		wt := &workloadTarget{deployment: &appsv1.Deployment{
+			Spec: appsv1.DeploymentSpec{Replicas: &replicas},
+		}}
+		Expect(wt.desiredReplicas()).To(Equal(int32(3)))
+	})
+
+	It("desiredReplicas reflects explicit replica count (StatefulSet)", func() {
+		replicas := int32(2)
+		wt := &workloadTarget{statefulSet: &appsv1.StatefulSet{
+			Spec: appsv1.StatefulSetSpec{Replicas: &replicas},
+		}}
+		Expect(wt.desiredReplicas()).To(Equal(int32(2)))
 	})
 })

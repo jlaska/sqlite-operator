@@ -223,6 +223,82 @@ var _ = Describe("SidecarInjector", func() {
 		}
 		Expect(envNames).To(ContainElements("LITESTREAM_ACCESS_KEY_ID", "LITESTREAM_SECRET_ACCESS_KEY"))
 	})
+
+	It("injects metrics port 9090 on the sidecar container", func() {
+		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyPatches(pod, resp.Patches)
+		var sidecar corev1.Container
+		for _, c := range patched.Spec.Containers {
+			if c.Name == litestreamName {
+				sidecar = c
+				break
+			}
+		}
+		Expect(sidecar.Ports).To(HaveLen(1))
+		Expect(sidecar.Ports[0].Name).To(Equal("metrics"))
+		Expect(sidecar.Ports[0].ContainerPort).To(BeNumerically("==", 9090))
+	})
+
+	It("adds Prometheus scrape annotations to the pod", func() {
+		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyPatches(pod, resp.Patches)
+		Expect(patched.Annotations).To(HaveKeyWithValue("prometheus.io/scrape", "true"))
+		Expect(patched.Annotations).To(HaveKeyWithValue("prometheus.io/port", "9090"))
+		Expect(patched.Annotations).To(HaveKeyWithValue("prometheus.io/path", "/metrics"))
+	})
+
+	It("injects default ephemeral-storage limit on sidecar when no resources specified", func() {
+		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyPatches(pod, resp.Patches)
+		var sidecar corev1.Container
+		for _, c := range patched.Spec.Containers {
+			if c.Name == litestreamName {
+				sidecar = c
+				break
+			}
+		}
+		Expect(sidecar.Resources.Limits).To(HaveKey(corev1.ResourceEphemeralStorage))
+	})
+
+	It("injects LITESTREAM_LOG_LEVEL env var when logLevel is set", func() {
+		db := &databasev1.SQLiteDB{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
+
+		dbWithLogLevel := newSQLiteDB(false)
+		dbWithLogLevel.Spec.Backup.LogLevel = "debug"
+		Expect(k8sClient.Create(ctx, dbWithLogLevel)).To(Succeed())
+
+		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		resp := newInjector().Handle(ctx, makeRequest(pod))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyPatches(pod, resp.Patches)
+		var sidecar corev1.Container
+		for _, c := range patched.Spec.Containers {
+			if c.Name == litestreamName {
+				sidecar = c
+				break
+			}
+		}
+		var found bool
+		for _, e := range sidecar.Env {
+			if e.Name == "LITESTREAM_LOG_LEVEL" && e.Value == "debug" {
+				found = true
+				break
+			}
+		}
+		Expect(found).To(BeTrue(), "expected LITESTREAM_LOG_LEVEL=debug env var")
+	})
 })
 
 var _ = Describe("SidecarInjector init container", func() {
@@ -638,6 +714,168 @@ var _ = Describe("SidecarInjector archive check", func() {
 	})
 })
 
+var _ = Describe("SidecarInjector auto-restore", func() {
+	const (
+		namespace         = "default"
+		arDBName          = "auto-restore-db"
+		arDeployName      = "auto-restore-app"
+		arDatabaseName    = "app.db"
+		arDatabasePath    = "/data"
+		arVolumeName      = "ar-data"
+		injectTrue        = "true"    // goconst
+		appContainerImage = "busybox" // goconst
+	)
+
+	ctx := context.Background()
+
+	newInjector := func() *webhook.SidecarInjector {
+		return &webhook.SidecarInjector{
+			Client:  k8sClient,
+			Decoder: admission.NewDecoder(k8sClient.Scheme()),
+		}
+	}
+
+	newPod := func(annotations map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "ar-pod", Namespace: namespace, Annotations: annotations},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "app", Image: appContainerImage,
+					VolumeMounts: []corev1.VolumeMount{{Name: arVolumeName, MountPath: arDatabasePath}},
+				}},
+				Volumes: []corev1.Volume{{
+					Name:         arVolumeName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+			},
+		}
+	}
+
+	makeRequest := func(pod *corev1.Pod) admission.Request {
+		raw, err := json.Marshal(pod)
+		Expect(err).NotTo(HaveOccurred())
+		return admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{
+				UID: "ar-uid", Namespace: namespace,
+				Operation: admissionv1.Create,
+				Object:    runtime.RawExtension{Raw: raw},
+			},
+		}
+	}
+
+	newAutoRestoreDB := func() *databasev1.SQLiteDB {
+		return &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: arDBName, Namespace: namespace},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:     arDatabaseName,
+				DatabasePath:     arDatabasePath,
+				TargetDeployment: arDeployName,
+				Backup: databasev1.BackupSpec{
+					Enabled:     true,
+					AutoRestore: true,
+					Destination: databasev1.BackupDestination{
+						S3: &databasev1.S3Destination{
+							Bucket:    "ar-bucket",
+							SecretRef: "ar-s3-creds",
+						},
+					},
+				},
+			},
+		}
+	}
+
+	BeforeEach(func() {
+		Expect(k8sClient.Create(ctx, newAutoRestoreDB())).To(Succeed())
+	})
+
+	AfterEach(func() {
+		db := &databasev1.SQLiteDB{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: arDBName, Namespace: namespace}, db); err == nil {
+			_ = k8sClient.Delete(ctx, db)
+		}
+	})
+
+	annotations := func() map[string]string {
+		return map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + arDBName,
+		}
+	}
+
+	It("injects auto-restore init container (not archive-check) when autoRestore=true", func() {
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations())))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations()), resp.Patches)
+		initNames := make([]string, len(patched.Spec.InitContainers))
+		for i, c := range patched.Spec.InitContainers {
+			initNames[i] = c.Name
+		}
+		Expect(initNames).To(ContainElement("litestream-restore"))
+		Expect(initNames).NotTo(ContainElement("litestream-archive-check"))
+	})
+
+	It("auto-restore init container is the first init container", func() {
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations())))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations()), resp.Patches)
+		Expect(patched.Spec.InitContainers).NotTo(BeEmpty())
+		Expect(patched.Spec.InitContainers[0].Name).To(Equal("litestream-restore"))
+	})
+
+	It("auto-restore init container script references -if-db-not-exists and -if-replica-exists flags", func() {
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations())))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations()), resp.Patches)
+		var restore corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-restore" {
+				restore = c
+				break
+			}
+		}
+		Expect(restore.Command).To(ContainElement(ContainSubstring("-if-db-not-exists")))
+		Expect(restore.Command).To(ContainElement(ContainSubstring("-if-replica-exists")))
+	})
+
+	It("auto-restore init container script includes PRAGMA quick_check integrity gate", func() {
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations())))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations()), resp.Patches)
+		var restore corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-restore" {
+				restore = c
+				break
+			}
+		}
+		script := strings.Join(restore.Command, " ")
+		Expect(script).To(ContainSubstring("quick_check"))
+	})
+
+	It("auto-restore init container has S3 credential env vars", func() {
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations())))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations()), resp.Patches)
+		var restore corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-restore" {
+				restore = c
+				break
+			}
+		}
+		envNames := make([]string, len(restore.Env))
+		for i, e := range restore.Env {
+			envNames[i] = e.Name
+		}
+		Expect(envNames).To(ContainElements("LITESTREAM_ACCESS_KEY_ID", "LITESTREAM_SECRET_ACCESS_KEY"))
+	})
+})
+
 var _ = Describe("SidecarInjector error paths", func() {
 	const (
 		namespace         = "default"
@@ -808,7 +1046,7 @@ func applyAllPatches(pod *corev1.Pod, patches []jsonpatch.JsonPatchOperation) *c
 	}
 	out := pod.DeepCopy()
 	for _, op := range patches {
-		if op.Operation != "add" {
+		if op.Operation != "add" && op.Operation != "replace" {
 			continue
 		}
 		raw, err := json.Marshal(op.Value)
@@ -836,6 +1074,27 @@ func applyAllPatches(pod *corev1.Pod, patches []jsonpatch.JsonPatchOperation) *c
 			var v corev1.Volume
 			if err := json.Unmarshal(raw, &v); err == nil && v.Name != "" {
 				out.Spec.Volumes = append(out.Spec.Volumes, v)
+			}
+		case op.Path == "/metadata/annotations":
+			var annotations map[string]string
+			if err := json.Unmarshal(raw, &annotations); err == nil {
+				if out.Annotations == nil {
+					out.Annotations = make(map[string]string)
+				}
+				for k, v := range annotations {
+					out.Annotations[k] = v
+				}
+			}
+		case strings.HasPrefix(op.Path, "/metadata/annotations/"):
+			var val string
+			if err := json.Unmarshal(raw, &val); err == nil {
+				if out.Annotations == nil {
+					out.Annotations = make(map[string]string)
+				}
+				// Path ends with the annotation key (URL-encoded '~1' for '/').
+				key := strings.TrimPrefix(op.Path, "/metadata/annotations/")
+				key = strings.ReplaceAll(key, "~1", "/")
+				out.Annotations[key] = val
 			}
 		}
 	}

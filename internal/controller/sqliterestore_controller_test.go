@@ -452,7 +452,7 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		return dbKey, restoreKey, deployKey
 	}
 
-	cleanupResources := func(dbKey, restoreKey, deployKey types.NamespacedName) {
+	cleanupResources := func(dbKey, restoreKey, deployKey types.NamespacedName) { //nolint:dupl
 		restore := &databasev1.SQLiteRestore{}
 		if err := k8sClient.Get(ctx, restoreKey, restore); err == nil {
 			_ = k8sClient.Delete(ctx, restore)
@@ -658,7 +658,7 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		}, job)).To(Succeed())
 	})
 
-	It("transitions to ScalingUp when Job succeeds", func() {
+	It("transitions to Validating when restore Job succeeds", func() { //nolint:dupl
 		dbKey, restoreKey, deployKey := newStateMachineResources("job-complete", 1)
 		defer cleanupResources(dbKey, restoreKey, deployKey)
 
@@ -667,8 +667,7 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		// Drive to Running.
 		driveToRunning(ctx, reconciler, dbKey, restoreKey, deployKey)
 
-		// Simulate Job success. Kubernetes 1.31+ requires SuccessCriteriaMet before Complete,
-		// plus startTime and completionTime.
+		// Simulate restore Job success.
 		jobKey := types.NamespacedName{Name: restoreKey.Name + "-restore", Namespace: namespaceName}
 		job := &batchv1.Job{}
 		Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
@@ -687,7 +686,69 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 
 		restore := &databasev1.SQLiteRestore{}
 		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+		// Running → Validating (integrity check phase inserted between Running and ScalingUp).
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseValidating))
+	})
+
+	It("transitions to ScalingUp when validation Job succeeds", func() { //nolint:dupl
+		dbKey, restoreKey, deployKey := newStateMachineResources("validate-pass", 1)
+		defer cleanupResources(dbKey, restoreKey, deployKey)
+
+		reconciler := newReconciler()
+		driveToValidating(ctx, reconciler, dbKey, restoreKey, deployKey)
+
+		// Simulate validation Job success.
+		validateJobKey := types.NamespacedName{Name: restoreKey.Name + "-validate", Namespace: namespaceName}
+		validateJob := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, validateJobKey, validateJob)).To(Succeed())
+		now := metav1.Now()
+		vpatch := client.MergeFrom(validateJob.DeepCopy())
+		validateJob.Status.StartTime = &now
+		validateJob.Status.CompletionTime = &now
+		validateJob.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
+			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
+		}
+		Expect(k8sClient.Status().Patch(ctx, validateJob, vpatch)).To(Succeed())
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		restore := &databasev1.SQLiteRestore{}
+		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
 		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseScalingUp))
+	})
+
+	It("transitions to Failed when validation Job fails (integrity check failure)", func() {
+		dbKey, restoreKey, deployKey := newStateMachineResources("validate-fail", 1)
+		defer cleanupResources(dbKey, restoreKey, deployKey)
+
+		reconciler := newReconciler()
+		driveToValidating(ctx, reconciler, dbKey, restoreKey, deployKey)
+
+		// Simulate validation Job failure (integrity check returned non-zero).
+		// Kubernetes 1.31+ requires FailureTarget=True before Failed=True and startTime.
+		validateJobKey := types.NamespacedName{Name: restoreKey.Name + "-validate", Namespace: namespaceName}
+		validateJob := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, validateJobKey, validateJob)).To(Succeed())
+		now := metav1.Now()
+		vpatch := client.MergeFrom(validateJob.DeepCopy())
+		validateJob.Status.StartTime = &now
+		validateJob.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+				Message: "sqlite integrity check failed", LastProbeTime: now, LastTransitionTime: now},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+				Message: "sqlite integrity check failed", LastProbeTime: now, LastTransitionTime: now},
+		}
+		Expect(k8sClient.Status().Patch(ctx, validateJob, vpatch)).To(Succeed())
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		restore := &databasev1.SQLiteRestore{}
+		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseFailed))
+		Expect(restore.Status.Message).To(ContainSubstring("integrity check failed"))
 	})
 
 	It("scales Deployment back to originalReplicas and transitions to Complete", func() {
@@ -695,23 +756,11 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		defer cleanupResources(dbKey, restoreKey, deployKey)
 
 		reconciler := newReconciler()
-		driveToRunning(ctx, reconciler, dbKey, restoreKey, deployKey)
+		// Drive through Running → Validating → ScalingUp.
+		driveToValidating(ctx, reconciler, dbKey, restoreKey, deployKey)
+		simulateValidationSuccess(ctx, restoreKey)
 
-		// Simulate Job success with all required Kubernetes 1.31+ fields.
-		jobKey := types.NamespacedName{Name: restoreKey.Name + "-restore", Namespace: namespaceName}
-		job := &batchv1.Job{}
-		Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
-		now := metav1.Now()
-		jobStatusPatch := client.MergeFrom(job.DeepCopy())
-		job.Status.StartTime = &now
-		job.Status.CompletionTime = &now
-		job.Status.Conditions = []batchv1.JobCondition{
-			{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
-			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
-		}
-		Expect(k8sClient.Status().Patch(ctx, job, jobStatusPatch)).To(Succeed())
-
-		// Running → ScalingUp.
+		// Validating → ScalingUp.
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -735,22 +784,10 @@ var _ = Describe("SQLiteRestore State Machine", func() {
 		defer cleanupResources(dbKey, restoreKey, deployKey)
 
 		reconciler := newReconciler()
-		driveToRunning(ctx, reconciler, dbKey, restoreKey, deployKey)
+		driveToValidating(ctx, reconciler, dbKey, restoreKey, deployKey)
+		simulateValidationSuccess(ctx, restoreKey)
 
-		jobKey := types.NamespacedName{Name: restoreKey.Name + "-restore", Namespace: namespaceName}
-		job := &batchv1.Job{}
-		Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
-		now := metav1.Now()
-		jobStatusPatch := client.MergeFrom(job.DeepCopy())
-		job.Status.StartTime = &now
-		job.Status.CompletionTime = &now
-		job.Status.Conditions = []batchv1.JobCondition{
-			{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
-			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
-		}
-		Expect(k8sClient.Status().Patch(ctx, job, jobStatusPatch)).To(Succeed())
-
-		// Running → ScalingUp → Complete.
+		// Validating → ScalingUp → Complete.
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
@@ -976,4 +1013,294 @@ func driveToRunning(
 	restore := &databasev1.SQLiteRestore{}
 	Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
 	Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseRunning))
+}
+
+// driveToValidating drives a restore through Running → Validating by simulating
+// a successful restore Job and creating the validation Job.
+func driveToValidating(
+	ctx context.Context,
+	reconciler *SQLiteRestoreReconciler,
+	dbKey, restoreKey, deployKey types.NamespacedName,
+) {
+	driveToRunning(ctx, reconciler, dbKey, restoreKey, deployKey)
+
+	// Simulate restore Job success.
+	jobKey := types.NamespacedName{Name: restoreKey.Name + "-restore", Namespace: restoreKey.Namespace}
+	job := &batchv1.Job{}
+	Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
+	now := metav1.Now()
+	jobStatusPatch := client.MergeFrom(job.DeepCopy())
+	job.Status.StartTime = &now
+	job.Status.CompletionTime = &now
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
+		{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
+	}
+	Expect(k8sClient.Status().Patch(ctx, job, jobStatusPatch)).To(Succeed())
+
+	// Running → Validating (creates validation Job).
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+	Expect(err).NotTo(HaveOccurred())
+
+	// First Validating reconcile creates the validation Job.
+	_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+	Expect(err).NotTo(HaveOccurred())
+
+	restore := &databasev1.SQLiteRestore{}
+	Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+	Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseValidating))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// StatefulSet target tests — drive the restore state machine against a StatefulSet.
+// ─────────────────────────────────────────────────────────────────────────────
+
+var _ = Describe("SQLiteRestore State Machine with StatefulSet target", func() {
+	const (
+		namespaceName = "default"
+		targetPVC     = "sm-sts-restore-pvc"
+		targetPath    = "/data/myapp.db"
+		secretRef     = "sm-sts-s3-creds"
+		bucketName    = "sm-sts-backups"
+	)
+
+	ctx := context.Background()
+
+	// newStateMachineResourcesSTS creates isolated resources targeting a StatefulSet.
+	newStateMachineResourcesSTS := func(suffix string, replicas int32) (
+		dbKey types.NamespacedName,
+		restoreKey types.NamespacedName,
+		stsKey types.NamespacedName,
+	) {
+		dbName := "sm-sts-db-" + suffix
+		restoreName := "sm-sts-restore-" + suffix
+		stsName := "sm-sts-app-" + suffix
+
+		dbKey = types.NamespacedName{Name: dbName, Namespace: namespaceName}
+		restoreKey = types.NamespacedName{Name: restoreName, Namespace: namespaceName}
+		stsKey = types.NamespacedName{Name: stsName, Namespace: namespaceName}
+
+		sts := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: stsName, Namespace: namespaceName},
+			Spec: appsv1.StatefulSetSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"app": stsName},
+				},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": stsName}},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "busybox"}},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+
+		db := &databasev1.SQLiteDB{
+			ObjectMeta: metav1.ObjectMeta{Name: dbName, Namespace: namespaceName},
+			Spec: databasev1.SQLiteDBSpec{
+				DatabaseName:      "myapp.db",
+				DatabasePath:      "/data",
+				TargetStatefulSet: stsName,
+				Backup: databasev1.BackupSpec{
+					Enabled: true,
+					Destination: databasev1.BackupDestination{
+						S3: &databasev1.S3Destination{
+							Bucket:    bucketName,
+							SecretRef: secretRef,
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+
+		// Wait for SQLiteDBReconciler to create the Litestream ConfigMap.
+		Eventually(func(g Gomega) {
+			cm := &corev1.ConfigMap{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: dbName + "-litestream", Namespace: namespaceName,
+			}, cm)).To(Succeed())
+		}).Should(Succeed())
+
+		restore := &databasev1.SQLiteRestore{
+			ObjectMeta: metav1.ObjectMeta{Name: restoreName, Namespace: namespaceName},
+			Spec: databasev1.SQLiteRestoreSpec{
+				SourceRef:  dbName,
+				TargetPVC:  targetPVC,
+				TargetPath: targetPath,
+			},
+		}
+		Expect(k8sClient.Create(ctx, restore)).To(Succeed())
+
+		return dbKey, restoreKey, stsKey
+	}
+
+	cleanupSTS := func(dbKey, restoreKey, stsKey types.NamespacedName) { //nolint:dupl
+		restore := &databasev1.SQLiteRestore{}
+		if err := k8sClient.Get(ctx, restoreKey, restore); err == nil {
+			_ = k8sClient.Delete(ctx, restore)
+		}
+		db := &databasev1.SQLiteDB{}
+		if err := k8sClient.Get(ctx, dbKey, db); err == nil {
+			_ = k8sClient.Delete(ctx, db)
+		}
+		for _, suffix := range []string{"-litestream", "-init-sql"} {
+			cm := &corev1.ConfigMap{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{
+				Name: dbKey.Name + suffix, Namespace: namespaceName,
+			}, cm); err == nil {
+				_ = k8sClient.Delete(ctx, cm)
+			}
+		}
+		sts := &appsv1.StatefulSet{}
+		if err := k8sClient.Get(ctx, stsKey, sts); err == nil {
+			_ = k8sClient.Delete(ctx, sts)
+		}
+		job := &batchv1.Job{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{
+			Name: restoreKey.Name + "-restore", Namespace: namespaceName,
+		}, job); err == nil {
+			_ = k8sClient.Delete(ctx, job)
+		}
+	}
+
+	newReconciler := func() *SQLiteRestoreReconciler {
+		return &SQLiteRestoreReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: record.NewFakeRecorder(20),
+		}
+	}
+
+	It("sets pause annotation and transitions to Pausing (StatefulSet target)", func() {
+		dbKey, restoreKey, stsKey := newStateMachineResourcesSTS("pause-pending-sts", 1)
+		defer cleanupSTS(dbKey, restoreKey, stsKey)
+
+		reconciler := newReconciler()
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		db := &databasev1.SQLiteDB{}
+		Expect(k8sClient.Get(ctx, dbKey, db)).To(Succeed())
+		Expect(db.Annotations[databasev1.AnnotationPause]).To(Equal("true"))
+
+		restore := &databasev1.SQLiteRestore{}
+		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhasePausing))
+	})
+
+	It("scales StatefulSet to 0 and records originalReplicas", func() {
+		dbKey, restoreKey, stsKey := newStateMachineResourcesSTS("scale-down-sts", 1)
+		defer cleanupSTS(dbKey, restoreKey, stsKey)
+
+		reconciler := newReconciler()
+
+		// Pending → Pausing.
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		restore := &databasev1.SQLiteRestore{}
+		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+		Expect(restore.Status.OriginalReplicas).NotTo(BeNil())
+		Expect(*restore.Status.OriginalReplicas).To(Equal(int32(1)))
+
+		// Simulate ConfigMap updated to dbs: [].
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: dbKey.Name + "-litestream", Namespace: namespaceName,
+		}, cm)).To(Succeed())
+		cmPatch := client.MergeFrom(cm.DeepCopy())
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["litestream.yml"] = "dbs: []\n"
+		Expect(k8sClient.Patch(ctx, cm, cmPatch)).To(Succeed())
+
+		// Pausing → ScalingDown (scales StatefulSet to 0).
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		sts := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, stsKey, sts)).To(Succeed())
+		Expect(sts.Spec.Replicas).NotTo(BeNil())
+		Expect(*sts.Spec.Replicas).To(BeZero())
+	})
+
+	It("scales StatefulSet back to originalReplicas after successful restore", func() {
+		dbKey, restoreKey, stsKey := newStateMachineResourcesSTS("scale-up-sts", 1)
+		defer cleanupSTS(dbKey, restoreKey, stsKey)
+
+		reconciler := newReconciler()
+
+		// Drive through Pending → Pausing.
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Update ConfigMap to reflect pause.
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: dbKey.Name + "-litestream", Namespace: namespaceName,
+		}, cm)).To(Succeed())
+		cmPatch := client.MergeFrom(cm.DeepCopy())
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["litestream.yml"] = "dbs: []\n"
+		Expect(k8sClient.Patch(ctx, cm, cmPatch)).To(Succeed())
+
+		// Pausing → ScalingDown.
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Simulate StatefulSet fully scaled down (status.replicas = 0).
+		sts := &appsv1.StatefulSet{}
+		Expect(k8sClient.Get(ctx, stsKey, sts)).To(Succeed())
+		stsStatusPatch := client.MergeFrom(sts.DeepCopy())
+		sts.Status.Replicas = 0
+		Expect(k8sClient.Status().Patch(ctx, sts, stsStatusPatch)).To(Succeed())
+
+		// ScalingDown → Running (creates restore Job).
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		restore := &databasev1.SQLiteRestore{}
+		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseRunning))
+
+		// Transition through Validating → ScalingUp by faking job success.
+		restore = &databasev1.SQLiteRestore{}
+		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+		patch := client.MergeFrom(restore.DeepCopy())
+		restore.Status.Phase = databasev1.RestorePhaseScalingUp
+		Expect(k8sClient.Status().Patch(ctx, restore, patch)).To(Succeed())
+
+		// ScalingUp → Complete (scales StatefulSet back up to 1).
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, stsKey, sts)).To(Succeed())
+		Expect(sts.Spec.Replicas).NotTo(BeNil())
+		Expect(*sts.Spec.Replicas).To(Equal(int32(1)))
+
+		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
+		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+	})
+})
+
+// simulateValidationSuccess marks the validation Job as complete (integrity check passed).
+func simulateValidationSuccess(ctx context.Context, restoreKey types.NamespacedName) {
+	validateJobKey := types.NamespacedName{Name: restoreKey.Name + "-validate", Namespace: restoreKey.Namespace}
+	validateJob := &batchv1.Job{}
+	Expect(k8sClient.Get(ctx, validateJobKey, validateJob)).To(Succeed())
+	now := metav1.Now()
+	vpatch := client.MergeFrom(validateJob.DeepCopy())
+	validateJob.Status.StartTime = &now
+	validateJob.Status.CompletionTime = &now
+	validateJob.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
+		{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastProbeTime: now, LastTransitionTime: now},
+	}
+	Expect(k8sClient.Status().Patch(ctx, validateJob, vpatch)).To(Succeed())
 }

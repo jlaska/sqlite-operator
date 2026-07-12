@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -39,8 +38,10 @@ import (
 )
 
 const (
-	defaultLitestreamImage = "litestream/litestream:0.5.14"
-	restoreRequeueInterval = 5 * time.Second
+	defaultLitestreamImage  = "litestream/litestream:0.5.14"
+	restoreRequeueInterval  = 5 * time.Second
+	restoreLabelKey         = "sqlite.database.example.com/restore"
+	restoreTargetVolumeName = "target"
 )
 
 // SQLiteRestoreReconciler reconciles a SQLiteRestore object.
@@ -55,6 +56,7 @@ type SQLiteRestoreReconciler struct {
 // +kubebuilder:rbac:groups=database.example.com,resources=sqliterestores/finalizers,verbs=update
 // +kubebuilder:rbac:groups=database.example.com,resources=sqlitedbs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
 func (r *SQLiteRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -100,6 +102,8 @@ func (r *SQLiteRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.reconcileScalingDown(ctx, restore, sourceDB)
 	case databasev1.RestorePhaseRunning:
 		return r.reconcileRunning(ctx, restore, sourceDB)
+	case databasev1.RestorePhaseValidating:
+		return r.reconcileValidating(ctx, restore, sourceDB)
 	case databasev1.RestorePhaseScalingUp:
 		return r.reconcileScalingUp(ctx, restore, sourceDB)
 	default:
@@ -112,23 +116,19 @@ func (r *SQLiteRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 func (r *SQLiteRestoreReconciler) reconcilePending(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Record original replica count. If the Deployment is already gone (e.g. the
+	// Record original replica count. If the workload is already gone (e.g. the
 	// app was torn down before the restore), treat it as already at 0 — the
 	// scale-down step will be skipped and the restore Job runs immediately.
 	originalReplicas := int32(0)
-	deployment, err := r.getTargetDeployment(ctx, sourceDB)
+	wt, err := r.getTargetWorkloadForRestore(ctx, sourceDB)
 	switch {
 	case err == nil:
-		if deployment.Spec.Replicas != nil {
-			originalReplicas = *deployment.Spec.Replicas
-		} else {
-			originalReplicas = 1 // Kubernetes default
-		}
+		originalReplicas = wt.desiredReplicas()
 	case errors.IsNotFound(err):
-		log.Info("target Deployment not found; scale-down will be skipped")
+		log.Info("target workload not found; scale-down will be skipped")
 	default:
 		return ctrl.Result{}, r.failRestore(ctx, restore,
-			fmt.Sprintf("getting target Deployment for SQLiteDB %q: %v", sourceDB.Name, err))
+			fmt.Sprintf("getting target workload for SQLiteDB %q: %v", sourceDB.Name, err))
 	}
 
 	if err := r.pauseReplication(ctx, sourceDB); err != nil {
@@ -173,21 +173,21 @@ func (r *SQLiteRestoreReconciler) reconcilePausing(ctx context.Context, restore 
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 	}
 
-	// Scale Deployment to 0. If it no longer exists, treat it as already scaled down.
-	deployment, err := r.getTargetDeployment(ctx, sourceDB)
+	// Scale workload to 0. If it no longer exists, treat it as already scaled down.
+	wt, err := r.getTargetWorkloadForRestore(ctx, sourceDB)
 	if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, r.failRestore(ctx, restore,
-			fmt.Sprintf("cannot find target Deployment: %v", err))
+			fmt.Sprintf("cannot find target workload: %v", err))
 	}
 	if err == nil {
-		if scaleErr := r.scaleDeployment(ctx, deployment, 0); scaleErr != nil {
-			return ctrl.Result{}, fmt.Errorf("scaling Deployment to 0: %w", scaleErr)
+		if scaleErr := r.scaleWorkload(ctx, wt, 0); scaleErr != nil {
+			return ctrl.Result{}, fmt.Errorf("scaling workload to 0: %w", scaleErr)
 		}
-		log.Info("Scaled Deployment to 0, waiting for pods to terminate")
+		log.Info("Scaled workload to 0, waiting for pods to terminate")
 		r.Recorder.Eventf(restore, corev1.EventTypeNormal, "ScalingDown",
-			"Scaled Deployment %s to 0 replicas", deployment.Name)
+			"Scaled %s %s to 0 replicas", wt.typeName(), wt.name())
 	} else {
-		log.Info("target Deployment not found during Pausing; proceeding without scale-down")
+		log.Info("target workload not found during Pausing; proceeding without scale-down")
 	}
 
 	return ctrl.Result{RequeueAfter: restoreRequeueInterval}, r.setStatus(ctx, restore,
@@ -196,18 +196,18 @@ func (r *SQLiteRestoreReconciler) reconcilePausing(ctx context.Context, restore 
 }
 
 // reconcileScalingDown polls until all pods have terminated, then creates the restore Job.
-// If the Deployment no longer exists, treat it as already at 0 replicas.
+// If the workload no longer exists, treat it as already at 0 replicas.
 func (r *SQLiteRestoreReconciler) reconcileScalingDown(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	deployment, err := r.getTargetDeployment(ctx, sourceDB)
+	wt, err := r.getTargetWorkloadForRestore(ctx, sourceDB)
 	if err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, r.failRestore(ctx, restore,
-			fmt.Sprintf("cannot find target Deployment: %v", err))
+			fmt.Sprintf("cannot find target workload: %v", err))
 	}
 
-	if err == nil && deployment.Status.Replicas > 0 {
-		log.Info("Waiting for Deployment pods to terminate", "currentReplicas", deployment.Status.Replicas)
+	if err == nil && wt.runningReplicas() > 0 {
+		log.Info("Waiting for workload pods to terminate", "currentReplicas", wt.runningReplicas())
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 	}
 
@@ -258,9 +258,9 @@ func (r *SQLiteRestoreReconciler) reconcileRunning(ctx context.Context, restore 
 		case batchv1.JobComplete:
 			if cond.Status == corev1.ConditionTrue {
 				r.Recorder.Event(restore, corev1.EventTypeNormal, "RestoreJobComplete",
-					"Restore Job completed; scaling Deployment back up")
+					"Restore Job completed; running integrity check")
 				return ctrl.Result{RequeueAfter: restoreRequeueInterval}, r.setStatus(ctx, restore,
-					databasev1.RestorePhaseScalingUp, restore.Status.JobName, "scaling Deployment back up",
+					databasev1.RestorePhaseValidating, restore.Status.JobName, "running integrity check",
 					restore.Status.OriginalReplicas, restore.Status.StartTime, nil)
 			}
 		case batchv1.JobFailed:
@@ -278,7 +278,125 @@ func (r *SQLiteRestoreReconciler) reconcileRunning(ctx context.Context, restore 
 	return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 }
 
-// reconcileScalingUp scales the Deployment back to its original replica count,
+// reconcileValidating creates a validation Job that runs PRAGMA quick_check on the
+// restored database. On success it transitions to ScalingUp; on failure it calls
+// failRestoreWithCleanup so the Deployment is scaled back up and replication resumed.
+// This catches the restore corruption known in upstream issues #1164 and #1220 before
+// the application restarts against a corrupt database.
+func (r *SQLiteRestoreReconciler) reconcileValidating(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	validationJobName := restore.Name + "-validate"
+
+	// Create the validation Job if it does not yet exist.
+	validationJob := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: restore.Namespace, Name: validationJobName}, validationJob)
+	if errors.IsNotFound(err) {
+		newJob := r.buildValidationJob(restore, sourceDB, validationJobName)
+		if setErr := controllerutil.SetControllerReference(restore, newJob, r.Scheme); setErr != nil {
+			return ctrl.Result{}, setErr
+		}
+		if createErr := r.Create(ctx, newJob); createErr != nil && !errors.IsAlreadyExists(createErr) {
+			return ctrl.Result{}, fmt.Errorf("creating validation Job: %w", createErr)
+		}
+		log.Info("Created integrity-check validation Job", "job", validationJobName)
+		r.Recorder.Eventf(restore, corev1.EventTypeNormal, "ValidationStarted",
+			"Running PRAGMA quick_check on restored database")
+		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting validation Job: %w", err)
+	}
+
+	for _, cond := range validationJob.Status.Conditions {
+		switch cond.Type {
+		case batchv1.JobComplete:
+			if cond.Status == corev1.ConditionTrue {
+				r.Recorder.Event(restore, corev1.EventTypeNormal, "ValidationPassed",
+					"Integrity check passed; scaling Deployment back up")
+				return ctrl.Result{RequeueAfter: restoreRequeueInterval}, r.setStatus(ctx, restore,
+					databasev1.RestorePhaseScalingUp, restore.Status.JobName, "scaling Deployment back up",
+					restore.Status.OriginalReplicas, restore.Status.StartTime, nil)
+			}
+		case batchv1.JobFailed:
+			if cond.Status == corev1.ConditionTrue {
+				msg := "integrity check failed on restored database: PRAGMA quick_check returned errors. " +
+					"The S3 backup may be corrupt (Litestream upstream #1164/#1220). " +
+					"Try creating a new SQLiteRestore CR with an earlier -timestamp."
+				return ctrl.Result{}, r.failRestoreWithCleanup(ctx, restore, sourceDB, msg)
+			}
+		}
+	}
+
+	// Validation Job still running.
+	return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
+}
+
+// buildValidationJob constructs a Job that runs `sqlite3 <targetPath> "PRAGMA quick_check;"`.
+// It uses the initImage from the source SQLiteDB (keinos/sqlite3 by default) which
+// includes the sqlite3 CLI. The job mounts the target PVC at the parent directory.
+func (r *SQLiteRestoreReconciler) buildValidationJob(
+	restore *databasev1.SQLiteRestore,
+	sourceDB *databasev1.SQLiteDB,
+	jobName string,
+) *batchv1.Job {
+	image := sourceDB.Spec.InitImage
+	if image == "" {
+		image = "keinos/sqlite3:latest"
+	}
+
+	mountPath := filepath.Dir(restore.Spec.TargetPath)
+	jobLabels := map[string]string{
+		"app.kubernetes.io/managed-by":        "sqlite-operator",
+		restoreLabelKey: restore.Name,
+	}
+
+	// Run PRAGMA quick_check; output must be exactly "ok" for the job to succeed.
+	script := fmt.Sprintf(
+		`result=$(sqlite3 %q "PRAGMA quick_check;"); if [ "$result" = "ok" ]; then echo "ok"; exit 0; fi; echo "integrity check failed: $result"; exit 1`,
+		restore.Spec.TargetPath,
+	)
+
+	backoffLimit := int32(1)
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: restore.Namespace,
+			Labels:    jobLabels,
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: &backoffLimit,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: jobLabels},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:    "sqlite-integrity-check",
+							Image:   image,
+							Command: []string{"sh", "-c", script},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: restoreTargetVolumeName, MountPath: mountPath},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "target",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: restore.Spec.TargetPVC,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// reconcileScalingUp scales the workload back to its original replica count,
 // removes the pause annotation, and transitions to Complete.
 func (r *SQLiteRestoreReconciler) reconcileScalingUp(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -288,14 +406,14 @@ func (r *SQLiteRestoreReconciler) reconcileScalingUp(ctx context.Context, restor
 		target = *restore.Status.OriginalReplicas
 	}
 	if target > 0 {
-		deployment, err := r.getTargetDeployment(ctx, sourceDB)
+		wt, err := r.getTargetWorkloadForRestore(ctx, sourceDB)
 		if err != nil && !errors.IsNotFound(err) {
-			log.Error(err, "Cannot find target Deployment during scale-up; removing pause anyway")
+			log.Error(err, "Cannot find target workload during scale-up; removing pause anyway")
 		} else if err == nil {
-			if scaleErr := r.scaleDeployment(ctx, deployment, target); scaleErr != nil {
-				return ctrl.Result{}, fmt.Errorf("scaling Deployment back to %d: %w", target, scaleErr)
+			if scaleErr := r.scaleWorkload(ctx, wt, target); scaleErr != nil {
+				return ctrl.Result{}, fmt.Errorf("scaling workload back to %d: %w", target, scaleErr)
 			}
-			log.Info("Scaled Deployment back up", "replicas", target)
+			log.Info("Scaled workload back up", "replicas", target)
 		}
 	}
 
@@ -317,15 +435,15 @@ func (r *SQLiteRestoreReconciler) reconcileScalingUp(ctx context.Context, restor
 func (r *SQLiteRestoreReconciler) failRestoreWithCleanup(ctx context.Context, restore *databasev1.SQLiteRestore, sourceDB *databasev1.SQLiteDB, msg string) error {
 	log := logf.FromContext(ctx)
 
-	// Best-effort cleanup: scale back up if still at 0 and the Deployment exists.
-	if deployment, err := r.getTargetDeployment(ctx, sourceDB); err == nil && deployment.Status.Replicas == 0 {
+	// Best-effort cleanup: scale back up if still at 0 and the workload exists.
+	if wt, err := r.getTargetWorkloadForRestore(ctx, sourceDB); err == nil && wt.runningReplicas() == 0 {
 		target := int32(1)
 		if restore.Status.OriginalReplicas != nil {
 			target = *restore.Status.OriginalReplicas
 		}
 		if target > 0 {
-			if scaleErr := r.scaleDeployment(ctx, deployment, target); scaleErr != nil {
-				log.Error(scaleErr, "Failed to scale Deployment back up during cleanup")
+			if scaleErr := r.scaleWorkload(ctx, wt, target); scaleErr != nil {
+				log.Error(scaleErr, "Failed to scale workload back up during cleanup")
 			}
 		}
 	}
@@ -367,28 +485,6 @@ func (r *SQLiteRestoreReconciler) resumeReplication(ctx context.Context, db *dat
 	patch := client.MergeFrom(latest.DeepCopy())
 	delete(latest.Annotations, pauseAnnotation)
 	return r.Patch(ctx, latest, patch)
-}
-
-// scaleDeployment patches the Deployment's replica count.
-func (r *SQLiteRestoreReconciler) scaleDeployment(ctx context.Context, deployment *appsv1.Deployment, replicas int32) error {
-	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == replicas {
-		return nil // already at target
-	}
-	patch := client.MergeFrom(deployment.DeepCopy())
-	deployment.Spec.Replicas = &replicas
-	return r.Patch(ctx, deployment, patch)
-}
-
-// getTargetDeployment looks up the Deployment referenced by the SQLiteDB.
-func (r *SQLiteRestoreReconciler) getTargetDeployment(ctx context.Context, db *databasev1.SQLiteDB) (*appsv1.Deployment, error) {
-	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: db.Namespace,
-		Name:      db.Spec.TargetDeployment,
-	}, deployment); err != nil {
-		return nil, err
-	}
-	return deployment, nil
 }
 
 // buildRestoreJob constructs the Job that runs `litestream restore`.
@@ -433,7 +529,7 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 	mountPath := filepath.Dir(restore.Spec.TargetPath)
 	jobLabels := map[string]string{
 		"app.kubernetes.io/managed-by":        "sqlite-operator",
-		"sqlite.database.example.com/restore": restore.Name,
+		restoreLabelKey: restore.Name,
 	}
 
 	backoffLimit := int32(3)
@@ -458,7 +554,7 @@ func (r *SQLiteRestoreReconciler) buildRestoreJob(
 							// Endpoint is read from the mounted litestream.yml config.
 							Env: s3EnvVars(s3.SecretRef),
 							VolumeMounts: []corev1.VolumeMount{
-								{Name: "target", MountPath: mountPath},
+								{Name: restoreTargetVolumeName, MountPath: mountPath},
 								{Name: "litestream-config", MountPath: "/etc/litestream", ReadOnly: true},
 							},
 						},
