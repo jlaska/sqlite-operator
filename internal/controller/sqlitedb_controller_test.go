@@ -166,14 +166,20 @@ var _ = Describe("SQLiteDB Controller", func() {
 	It("should requeue after the status sync interval", func() {
 		// Call Reconcile directly to inspect the return value — the manager itself
 		// does not expose its RequeueAfter, so this tests the contract directly.
+		// Eventually retries on resourceVersion conflicts: the background manager
+		// may race on CreateOrUpdate for the Litestream ConfigMap. After the
+		// manager's reconcile settles it won't run again for statusSyncInterval,
+		// so the retry gets a clean window.
 		r := &SQLiteDBReconciler{
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
 			Recorder: record.NewFakeRecorder(1),
 		}
-		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(statusSyncInterval))
+		Eventually(func(g Gomega) {
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(result.RequeueAfter).To(Equal(statusSyncInterval))
+		}).Should(Succeed())
 	})
 
 	Context("replication pause", func() {
