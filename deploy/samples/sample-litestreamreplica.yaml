@@ -3,7 +3,7 @@
 # StatefulSets are the upstream-recommended workload type for Litestream because
 # they provide stable network identity and predictable pod names.
 apiVersion: litestream.io/v1
-kind: SQLiteDB
+kind: LitestreamReplica
 metadata:
   name: example-litestream-sts
   namespace: default
@@ -31,7 +31,7 @@ spec:
 ---
 # Example 2: Target a Deployment (alternative; must have replicas: 1)
 apiVersion: litestream.io/v1
-kind: SQLiteDB
+kind: LitestreamReplica
 metadata:
   name: example-litestream-dep
   namespace: default

@@ -19,7 +19,7 @@ litestream-operator injects a [Litestream](https://litestream.io) sidecar into y
 
 ```bash
 helm install litestream-operator oci://ghcr.io/jlaska/charts/litestream-operator \
-  --version 0.2.0 \
+  --version 0.4.0 \
   --namespace litestream-operator-system \
   --create-namespace
 ```
@@ -29,7 +29,7 @@ helm install litestream-operator oci://ghcr.io/jlaska/charts/litestream-operator
 > To skip cert-manager (bring your own webhook TLS secret):
 > ```bash
 > helm install litestream-operator oci://ghcr.io/jlaska/charts/litestream-operator \
->   --version 0.2.0 \
+>   --version 0.4.0 \
 >   --namespace litestream-operator-system \
 >   --create-namespace \
 >   --set certManager.enabled=false \

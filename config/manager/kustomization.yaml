@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: ghcr.io/jlaska/litestream-operator
-  newTag: v0.3.3
+  newTag: v0.4.0

@@ -1,5 +1,5 @@
 apiVersion: litestream.io/v1
-kind: SQLiteDB
+kind: LitestreamReplica
 metadata:
   labels:
     app.kubernetes.io/name: litestream-operator
