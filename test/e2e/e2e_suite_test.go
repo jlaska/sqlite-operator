@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/jlaska/sqlite-operator/test/utils"
+	"github.com/jlaska/litestream-operator/test/utils"
 )
 
 var (
@@ -44,7 +44,7 @@ var (
 		if img := os.Getenv("IMG"); img != "" {
 			return img
 		}
-		return "ghcr.io/jlaska/sqlite-operator:v0.3.3"
+		return "ghcr.io/jlaska/litestream-operator:v0.3.3"
 	}()
 )
 
@@ -54,7 +54,7 @@ var (
 // CertManager.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting sqlite-operator integration test suite\n")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting litestream-operator integration test suite\n")
 	RunSpecs(t, "e2e suite")
 }
 

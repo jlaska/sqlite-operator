@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
 )
 
 // All integration scenarios run in a single Ordered container so Ginkgo's
@@ -59,19 +59,19 @@ var _ = Describe("Integration", Ordered, func() {
 		})
 
 		AfterAll(func() {
-			runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 			runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		})
 
-		It("injects the Litestream sidecar into new pods after SQLiteDB CR is created", func() {
-			By("creating a SQLiteDB CR (backup disabled — just test injection)")
-			applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, false, ""))
+		It("injects the Litestream sidecar into new pods after LitestreamReplica CR is created", func() {
+			By("creating a LitestreamReplica CR (backup disabled — just test injection)")
+			applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, false, ""))
 
 			By("waiting for the controller to label and annotate the pod template")
 			Eventually(func(g Gomega) {
 				out, err := kubectlQ("get", "deployment", appName, "-n", testNamespace,
-					"-o", `jsonpath={.spec.template.metadata.labels.sqlite\.database\.example\.com/inject}`)
+					"-o", `jsonpath={.spec.template.metadata.labels.litestream\.io/inject}`)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(Equal("true"))
 			}).Should(Succeed())
@@ -85,9 +85,9 @@ var _ = Describe("Integration", Ordered, func() {
 				g.Expect(out).To(ContainSubstring("litestream"))
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("confirming SidecarInjected condition is True on the SQLiteDB")
+			By("confirming SidecarInjected condition is True on the LitestreamReplica")
 			Eventually(func(g Gomega) {
-				out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 					"-o", `jsonpath={.status.conditions[?(@.type=="SidecarInjected")].status}`)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(Equal("True"))
@@ -124,8 +124,8 @@ var _ = Describe("Integration", Ordered, func() {
 			kubectl("wait", "-n", testNamespace, "deployment/"+appName,
 				"--for=condition=Available", "--timeout=3m")
 
-			By("creating SQLiteDB CR with backup enabled and initSQL")
-			applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+			By("creating LitestreamReplica CR with backup enabled and initSQL")
+			applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
 
 			By("waiting for sidecar injection rollout to complete (2/2 containers)")
 			Eventually(func(g Gomega) {
@@ -138,7 +138,7 @@ var _ = Describe("Integration", Ordered, func() {
 		})
 
 		AfterAll(func() {
-			// Leave the SQLiteDB and its backup intact — Scenario 3 restores from it.
+			// Leave the LitestreamReplica and its backup intact — Scenario 3 restores from it.
 			runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		})
 
@@ -176,9 +176,9 @@ var _ = Describe("Integration", Ordered, func() {
 				}
 			}, 3*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("verifying BackupHealthy condition is True on the SQLiteDB")
+			By("verifying BackupHealthy condition is True on the LitestreamReplica")
 			Eventually(func(g Gomega) {
-				out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+				out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 					"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(Equal("True"))
@@ -186,9 +186,9 @@ var _ = Describe("Integration", Ordered, func() {
 		})
 	})
 
-	// ── Scenario 3: SQLiteRestore ─────────────────────────────────────────
+	// ── Scenario 3: LitestreamRestore ─────────────────────────────────────────
 
-	Describe("SQLiteRestore", func() {
+	Describe("LitestreamRestore", func() {
 		const (
 			sourceDBName  = "backup-test-db" // backup created by Scenario 2
 			restoreName   = "integration-restore"
@@ -205,20 +205,20 @@ var _ = Describe("Integration", Ordered, func() {
 			// --wait=false: completed restore job pods hold PVC references; waiting for
 			// the PVC to fully disappear blocks indefinitely until async GC removes them.
 			// AfterSuite namespace deletion cleans up any remaining resources.
-			runIgnoreError("kubectl", "delete", "sqliterestore", restoreName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
-			runIgnoreError("kubectl", "delete", "sqlitedb", sourceDBName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "litestreamrestore", restoreName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+			runIgnoreError("kubectl", "delete", "litestreamreplica", sourceDBName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 			runIgnoreError("kubectl", "delete", "pvc", restorePVC, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 			runIgnoreError("kubectl", "delete", "pvc", "backup-test-pvc", "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		})
 
 		It("restore Job completes and database file appears on the target PVC", func() {
-			By("creating a SQLiteRestore CR")
-			applyLiteral(sqliteRestoreManifest(restoreName, testNamespace, sourceDBName, restorePVC, restoreTarget))
+			By("creating a LitestreamRestore CR")
+			applyLiteral(litestreamRestoreManifest(restoreName, testNamespace, sourceDBName, restorePVC, restoreTarget))
 
 			By("waiting for the restore Job to be created")
 			Eventually(func(g Gomega) {
 				out, err := kubectlQ("get", "jobs", "-n", testNamespace,
-					"-l", "sqlite.database.example.com/restore="+restoreName,
+					"-l", "litestream.io/restore="+restoreName,
 					"-o", "jsonpath={.items[0].metadata.name}")
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).NotTo(BeEmpty())
@@ -226,16 +226,16 @@ var _ = Describe("Integration", Ordered, func() {
 
 			By("waiting for the restore Job to Complete (up to 5 minutes)")
 			Eventually(func(g Gomega) {
-				phase, err := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
+				phase, err := kubectlQ("get", "litestreamrestore", restoreName, "-n", testNamespace,
 					"-o", "jsonpath={.status.phase}")
 				g.Expect(err).NotTo(HaveOccurred())
 				if phase == "Failed" || phase == "Running" {
-					jobName, _ := kubectlQ("get", "sqliterestore", restoreName, "-n", testNamespace,
+					jobName, _ := kubectlQ("get", "litestreamrestore", restoreName, "-n", testNamespace,
 						"-o", "jsonpath={.status.jobName}")
 					if jobName != "" {
 						// Show pod status — useful when kubectl logs times out (pod pending/between retries).
 						pods, _ := kubectlQ("get", "pods", "-n", testNamespace,
-							"-l", "sqlite.database.example.com/restore="+restoreName, "-o", "wide")
+							"-l", "litestream.io/restore="+restoreName, "-o", "wide")
 						GinkgoWriter.Printf("\n=== restore Job pods ===\n%s\n", pods)
 						// --previous gets logs from the last terminated container
 						// even when the pod is currently between retries.
@@ -277,16 +277,16 @@ var _ = Describe("Replication Pause", Ordered, func() {
 	)
 
 	BeforeAll(func() {
-		By("creating PVC, Deployment, and SQLiteDB CR with backup enabled")
+		By("creating PVC, Deployment, and LitestreamReplica CR with backup enabled")
 		applyLiteral(pvcManifest(pvcName, testNamespace))
 		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
 		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
 			"--for=condition=Available", "--timeout=3m")
-		applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, true, ""))
+		applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, ""))
 
 		By("waiting for sidecar injection and BackupHealthy=True")
 		Eventually(func(g Gomega) {
-			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("True"))
@@ -295,17 +295,17 @@ var _ = Describe("Replication Pause", Ordered, func() {
 
 	AfterAll(func() {
 		// Ensure pause annotation is removed even if test fails mid-way.
-		runIgnoreError("kubectl", "annotate", "sqlitedb", dbName, "-n", testNamespace,
-			"sqlite.database.example.com/pause-", "--ignore-not-found")
-		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "annotate", "litestreamreplica", dbName, "-n", testNamespace,
+			"litestream.io/pause-", "--ignore-not-found")
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 	})
 
 	It("pauses replication when annotation is set and resumes when removed", func() {
-		By("setting pause annotation on SQLiteDB")
-		kubectl("annotate", "sqlitedb", dbName, "-n", testNamespace,
-			"sqlite.database.example.com/pause=true", "--overwrite")
+		By("setting pause annotation on LitestreamReplica")
+		kubectl("annotate", "litestreamreplica", dbName, "-n", testNamespace,
+			"litestream.io/pause=true", "--overwrite")
 
 		By("waiting for ConfigMap to reflect pause (dbs: [])")
 		Eventually(func(g Gomega) {
@@ -317,7 +317,7 @@ var _ = Describe("Replication Pause", Ordered, func() {
 
 		By("verifying ReplicationPaused condition is True")
 		Eventually(func(g Gomega) {
-			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 				"-o", `jsonpath={.status.conditions[?(@.type=="ReplicationPaused")].status}`)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("True"))
@@ -325,15 +325,15 @@ var _ = Describe("Replication Pause", Ordered, func() {
 
 		By("verifying phase is Paused")
 		Eventually(func(g Gomega) {
-			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 				"-o", "jsonpath={.status.phase}")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("Paused"))
 		}).Should(Succeed())
 
 		By("removing pause annotation")
-		kubectl("annotate", "sqlitedb", dbName, "-n", testNamespace,
-			"sqlite.database.example.com/pause-")
+		kubectl("annotate", "litestreamreplica", dbName, "-n", testNamespace,
+			"litestream.io/pause-")
 
 		By("waiting for ConfigMap to restore normal config")
 		Eventually(func(g Gomega) {
@@ -346,7 +346,7 @@ var _ = Describe("Replication Pause", Ordered, func() {
 
 		By("verifying phase returns to Ready")
 		Eventually(func(g Gomega) {
-			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 				"-o", "jsonpath={.status.phase}")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("Ready"))
@@ -358,7 +358,7 @@ var _ = Describe("Replication Pause", Ordered, func() {
 //
 // Verifies the full end-to-end webhook rejection when a user targets a Deployment
 // that has replicas > 1. Litestream requires exactly one writer; the admitting
-// webhook must reject the SQLiteDB create at the API layer.
+// webhook must reject the LitestreamReplica create at the API layer.
 
 var _ = Describe("Multi-Replica Rejection", func() {
 	const (
@@ -401,16 +401,16 @@ spec:
 	})
 
 	AfterEach(func() {
-		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 	})
 
-	It("webhook rejects SQLiteDB pointing at a multi-replica Deployment", func() {
-		By("attempting to create a SQLiteDB targeting the 2-replica Deployment")
+	It("webhook rejects LitestreamReplica pointing at a multi-replica Deployment", func() {
+		By("attempting to create a LitestreamReplica targeting the 2-replica Deployment")
 		manifest := fmt.Sprintf(`
-apiVersion: database.example.com/v1
-kind: SQLiteDB
+apiVersion: litestream.io/v1
+kind: LitestreamReplica
 metadata:
   name: %s
   namespace: %s
@@ -424,7 +424,7 @@ spec:
 
 		// The webhook must reject the create with a validation error.
 		By("expecting admission rejection (replicas > 1 is a hard error)")
-		Expect(err).To(HaveOccurred(), "webhook should reject SQLiteDB targeting a 2-replica Deployment")
+		Expect(err).To(HaveOccurred(), "webhook should reject LitestreamReplica targeting a 2-replica Deployment")
 		Expect(strings.ToLower(out)).To(ContainSubstring("replicas"),
 			"rejection message should mention replicas; got: %s", out)
 	})
@@ -446,16 +446,16 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 	BeforeAll(func() {
 		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
 
-		By("creating PVC, Deployment, and SQLiteDB CR with backup enabled and initSQL")
+		By("creating PVC, Deployment, and LitestreamReplica CR with backup enabled and initSQL")
 		applyLiteral(pvcManifest(pvcName, testNamespace))
 		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
 		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
 			"--for=condition=Available", "--timeout=3m")
-		applyLiteral(sqliteDBManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+		applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
 
 		By("waiting for sidecar injection and BackupHealthy=True")
 		Eventually(func(g Gomega) {
-			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("True"))
@@ -483,8 +483,8 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		runIgnoreError("kubectl", "delete", "sqliterestore", "archive-check-restore", "-n", testNamespace, "--ignore-not-found", "--wait=false")
-		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "litestreamrestore", "archive-check-restore", "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
 	})
@@ -514,26 +514,26 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 				"expected archive-check init container to exit 1")
 		}, 3*time.Minute, 10*time.Second).Should(Succeed())
 
-		By("verifying ArchiveCheckFailed condition on SQLiteDB")
+		By("verifying ArchiveCheckFailed condition on LitestreamReplica")
 		Eventually(func(g Gomega) {
-			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 				"-o", `jsonpath={.status.conditions[?(@.type=="ArchiveCheckFailed")].status}`)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("True"))
 		}).Should(Succeed())
 	})
 
-	It("SQLiteRestore recovers data and allows pod to restart successfully", func() {
-		By("creating a SQLiteRestore CR targeting the same PVC")
-		applyLiteral(sqliteRestoreManifest("archive-check-restore", testNamespace, dbName, pvcName, dbPath+"/"+dbFile))
+	It("LitestreamRestore recovers data and allows pod to restart successfully", func() {
+		By("creating a LitestreamRestore CR targeting the same PVC")
+		applyLiteral(litestreamRestoreManifest("archive-check-restore", testNamespace, dbName, pvcName, dbPath+"/"+dbFile))
 
 		By("waiting for restore to reach Complete phase")
 		Eventually(func(g Gomega) {
-			phase, err := kubectlQ("get", "sqliterestore", "archive-check-restore", "-n", testNamespace,
+			phase, err := kubectlQ("get", "litestreamrestore", "archive-check-restore", "-n", testNamespace,
 				"-o", "jsonpath={.status.phase}")
 			g.Expect(err).NotTo(HaveOccurred())
 			if phase == "Failed" {
-				jobName, _ := kubectlQ("get", "sqliterestore", "archive-check-restore", "-n", testNamespace,
+				jobName, _ := kubectlQ("get", "litestreamrestore", "archive-check-restore", "-n", testNamespace,
 					"-o", "jsonpath={.status.jobName}")
 				if jobName != "" {
 					logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50", "--request-timeout=15s")
@@ -565,7 +565,7 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 
 		By("verifying BackupHealthy=True after restore (Litestream resumed)")
 		Eventually(func(g Gomega) {
-			out, err := kubectlQ("get", "sqlitedb", dbName, "-n", testNamespace,
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
 				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("True"))
@@ -621,11 +621,11 @@ spec:
 `, name, ns, name, name, mountPath, pvcName)
 }
 
-func sqliteDBManifest(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string) string {
-	db := &databasev1.SQLiteDB{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "database.example.com/v1", Kind: "SQLiteDB"},
+func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string) string {
+	db := &databasev1.LitestreamReplica{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamReplica"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: databasev1.SQLiteDBSpec{
+		Spec: databasev1.LitestreamReplicaSpec{
 			DatabaseName:     dbFile,
 			DatabasePath:     dbPath,
 			TargetDeployment: target,
@@ -648,15 +648,15 @@ func sqliteDBManifest(name, ns, target, dbFile, dbPath string, backupEnabled boo
 	}
 	data, err := sigsyaml.Marshal(db)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	GinkgoWriter.Printf("--- SQLiteDB CR YAML applied (%s) ---\n%s\n", name, string(data))
+	GinkgoWriter.Printf("--- LitestreamReplica CR YAML applied (%s) ---\n%s\n", name, string(data))
 	return string(data)
 }
 
-func sqliteRestoreManifest(name, ns, sourceRef, pvc, targetPath string) string {
-	restore := &databasev1.SQLiteRestore{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "database.example.com/v1", Kind: "SQLiteRestore"},
+func litestreamRestoreManifest(name, ns, sourceRef, pvc, targetPath string) string {
+	restore := &databasev1.LitestreamRestore{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamRestore"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: databasev1.SQLiteRestoreSpec{
+		Spec: databasev1.LitestreamRestoreSpec{
 			SourceRef:  sourceRef,
 			TargetPVC:  pvc,
 			TargetPath: targetPath,
@@ -734,7 +734,7 @@ func mcList(path string) string {
 // dumpReplicationDiagnostics prints a diagnostic snapshot to help debug Litestream
 // replication failures. Call via DeferCleanup before polling mc ls so the output
 // appears after any failure, regardless of which check timed out.
-// dbName is the SQLiteDB CR name (used for ConfigMap lookup: <dbName>-litestream).
+// dbName is the LitestreamReplica CR name (used for ConfigMap lookup: <dbName>-litestream).
 // dbFile is the database filename (used for sqlite3 access: /data/<dbFile>).
 func dumpReplicationDiagnostics(appName, dbName, dbFile string) {
 	GinkgoWriter.Printf("\n====== replication diagnostics: %s / %s ======\n", appName, dbName)

@@ -38,14 +38,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
 )
 
-// newFakeDB creates a minimal SQLiteDB for fake client tests.
-func newFakeDB(name, namespace, targetDep string) *databasev1.SQLiteDB {
-	return &databasev1.SQLiteDB{
+// newFakeDB creates a minimal LitestreamReplica for fake client tests.
+func newFakeDB(name, namespace, targetDep string) *databasev1.LitestreamReplica {
+	return &databasev1.LitestreamReplica{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: databasev1.SQLiteDBSpec{
+		Spec: databasev1.LitestreamReplicaSpec{
 			DatabaseName:     "app.db",
 			DatabasePath:     "/data",
 			TargetDeployment: targetDep,
@@ -75,11 +75,11 @@ func newFakeDeployment(name, namespace string) *appsv1.Deployment {
 	}
 }
 
-// newFakeRestore returns a minimal SQLiteRestore for fake client tests.
-func newFakeRestore(name, namespace, sourceRef, phase string) *databasev1.SQLiteRestore {
-	r := &databasev1.SQLiteRestore{
+// newFakeRestore returns a minimal LitestreamRestore for fake client tests.
+func newFakeRestore(name, namespace, sourceRef, phase string) *databasev1.LitestreamRestore {
+	r := &databasev1.LitestreamRestore{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: databasev1.SQLiteRestoreSpec{
+		Spec: databasev1.LitestreamRestoreSpec{
 			SourceRef:  sourceRef,
 			TargetPVC:  "restore-pvc",
 			TargetPath: "/data/app.db",
@@ -90,8 +90,8 @@ func newFakeRestore(name, namespace, sourceRef, phase string) *databasev1.SQLite
 }
 
 // buildFakeDBClient creates a fake client loaded with the given objects and interceptors,
-// then returns a SQLiteDBReconciler backed by it.
-func buildFakeDBClient(objs []client.Object, funcs interceptor.Funcs) *SQLiteDBReconciler {
+// then returns a LitestreamReplicaReconciler backed by it.
+func buildFakeDBClient(objs []client.Object, funcs interceptor.Funcs) *LitestreamReplicaReconciler {
 	b := fake.NewClientBuilder().
 		WithScheme(scheme.Scheme).
 		WithInterceptorFuncs(funcs)
@@ -101,7 +101,7 @@ func buildFakeDBClient(objs []client.Object, funcs interceptor.Funcs) *SQLiteDBR
 		var statusObjs []client.Object
 		for _, o := range objs {
 			switch o.(type) {
-			case *databasev1.SQLiteDB, *databasev1.SQLiteRestore:
+			case *databasev1.LitestreamReplica, *databasev1.LitestreamRestore:
 				statusObjs = append(statusObjs, o)
 			}
 		}
@@ -110,7 +110,7 @@ func buildFakeDBClient(objs []client.Object, funcs interceptor.Funcs) *SQLiteDBR
 		}
 	}
 	fc := b.Build()
-	return &SQLiteDBReconciler{
+	return &LitestreamReplicaReconciler{
 		Client:   fc,
 		Scheme:   scheme.Scheme,
 		Recorder: record.NewFakeRecorder(10),
@@ -118,8 +118,8 @@ func buildFakeDBClient(objs []client.Object, funcs interceptor.Funcs) *SQLiteDBR
 }
 
 // buildFakeRestoreClient creates a fake client loaded with the given objects and interceptors,
-// then returns a SQLiteRestoreReconciler backed by it.
-func buildFakeRestoreClient(objs []client.Object, funcs interceptor.Funcs) *SQLiteRestoreReconciler {
+// then returns a LitestreamRestoreReconciler backed by it.
+func buildFakeRestoreClient(objs []client.Object, funcs interceptor.Funcs) *LitestreamRestoreReconciler {
 	b := fake.NewClientBuilder().
 		WithScheme(scheme.Scheme).
 		WithInterceptorFuncs(funcs)
@@ -128,7 +128,7 @@ func buildFakeRestoreClient(objs []client.Object, funcs interceptor.Funcs) *SQLi
 		var statusObjs []client.Object
 		for _, o := range objs {
 			switch o.(type) {
-			case *databasev1.SQLiteDB, *databasev1.SQLiteRestore:
+			case *databasev1.LitestreamReplica, *databasev1.LitestreamRestore:
 				statusObjs = append(statusObjs, o)
 			}
 		}
@@ -137,7 +137,7 @@ func buildFakeRestoreClient(objs []client.Object, funcs interceptor.Funcs) *SQLi
 		}
 	}
 	fc := b.Build()
-	return &SQLiteRestoreReconciler{
+	return &LitestreamRestoreReconciler{
 		Client:   fc,
 		Scheme:   scheme.Scheme,
 		Recorder: record.NewFakeRecorder(10),
@@ -145,10 +145,10 @@ func buildFakeRestoreClient(objs []client.Object, funcs interceptor.Funcs) *SQLi
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SQLiteDBReconciler error injection
+// LitestreamReplicaReconciler error injection
 // ─────────────────────────────────────────────────────────────────────────────
 
-var _ = Describe("SQLiteDBReconciler error injection", func() {
+var _ = Describe("LitestreamReplicaReconciler error injection", func() {
 	const (
 		ns      = "default"
 		dbName  = "fake-db"
@@ -157,10 +157,10 @@ var _ = Describe("SQLiteDBReconciler error injection", func() {
 	ctx := context.Background()
 	key := reconcile.Request{NamespacedName: types.NamespacedName{Name: dbName, Namespace: ns}}
 
-	It("Reconcile returns error when Get(SQLiteDB) returns transient error", func() {
+	It("Reconcile returns error when Get(LitestreamReplica) returns transient error", func() {
 		r := buildFakeDBClient(nil, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-				if _, ok := o.(*databasev1.SQLiteDB); ok {
+				if _, ok := o.(*databasev1.LitestreamReplica); ok {
 					return fmt.Errorf("transient API error")
 				}
 				return c.Get(ctx, k, o, opts...)
@@ -203,10 +203,10 @@ var _ = Describe("SQLiteDBReconciler error injection", func() {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SQLiteRestoreReconciler error injection
+// LitestreamRestoreReconciler error injection
 // ─────────────────────────────────────────────────────────────────────────────
 
-var _ = Describe("SQLiteRestoreReconciler error injection", func() {
+var _ = Describe("LitestreamRestoreReconciler error injection", func() {
 	const (
 		ns          = "default"
 		srcDBName   = "fake-src-db"
@@ -216,10 +216,10 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 	ctx := context.Background()
 	restoreKey := reconcile.Request{NamespacedName: types.NamespacedName{Name: restoreName, Namespace: ns}}
 
-	It("Reconcile returns error when Get(SQLiteRestore) returns transient error", func() {
+	It("Reconcile returns error when Get(LitestreamRestore) returns transient error", func() {
 		r := buildFakeRestoreClient(nil, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-				if _, ok := o.(*databasev1.SQLiteRestore); ok {
+				if _, ok := o.(*databasev1.LitestreamRestore); ok {
 					return fmt.Errorf("transient API error")
 				}
 				return c.Get(ctx, k, o, opts...)
@@ -237,7 +237,7 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 
 		r := buildFakeRestoreClient([]client.Object{db, restore}, interceptor.Funcs{
 			Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
-				if _, ok := o.(*databasev1.SQLiteDB); ok {
+				if _, ok := o.(*databasev1.LitestreamReplica); ok {
 					return fmt.Errorf("patch failed")
 				}
 				return c.Patch(ctx, o, p, opts...)
@@ -245,7 +245,7 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		})
 		_, err := r.Reconcile(ctx, restoreKey)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("setting pause annotation on SQLiteDB"))
+		Expect(err.Error()).To(ContainSubstring("setting pause annotation on LitestreamReplica"))
 	})
 
 	It("reconcilePausing returns error when Get(ConfigMap) fails", func() {
@@ -346,7 +346,7 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		Expect(err.Error()).To(ContainSubstring("getting validation Job"))
 	})
 
-	It("reconcileScalingUp returns error when resumeReplication re-fetch of SQLiteDB fails", func() {
+	It("reconcileScalingUp returns error when resumeReplication re-fetch of LitestreamReplica fails", func() {
 		db := newFakeDB(srcDBName, ns, srcDepName)
 		// Pause annotation must be set so resumeReplication proceeds to the re-fetch.
 		db.Annotations = map[string]string{pauseAnnotation: injectEnabled}
@@ -357,12 +357,12 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		restore := newFakeRestore(restoreName, ns, srcDBName, databasev1.RestorePhaseScalingUp)
 		restore.Status.OriginalReplicas = &zero
 
-		// Allow the first SQLiteDB Get (Reconcile's sourceDB lookup) to succeed.
+		// Allow the first LitestreamReplica Get (Reconcile's sourceDB lookup) to succeed.
 		// The second Get (resumeReplication's re-fetch) must fail.
 		dbGetCount := 0
 		r := buildFakeRestoreClient([]client.Object{db, restore}, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-				if _, ok := o.(*databasev1.SQLiteDB); ok {
+				if _, ok := o.(*databasev1.LitestreamReplica); ok {
 					dbGetCount++
 					if dbGetCount > 1 {
 						return fmt.Errorf("transient re-fetch error")

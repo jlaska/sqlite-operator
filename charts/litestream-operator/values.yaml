@@ -1,0 +1,87 @@
+## litestream-operator Helm chart values
+
+## Operator image
+image:
+  repository: ghcr.io/jlaska/litestream-operator
+  tag: ""        # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+## Number of operator replicas (>1 requires leaderElect: true)
+replicaCount: 1
+
+## Leader election — required when replicaCount > 1
+leaderElect: true
+
+## Namespace to install into (defaults to Release.Namespace)
+# namespace: litestream-operator-system
+
+## Service account
+serviceAccount:
+  create: true
+  name: ""        # auto-generated from release name if empty
+  annotations: {}
+
+## Operator pod resource limits
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+## Pod security context (Restricted PSS)
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+## Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+## Extra pod annotations
+podAnnotations: {}
+
+## Node selector, tolerations, affinity
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+## Webhook configuration
+webhook:
+  ## Enable the mutating and validating webhooks.
+  ## Requires certManager.enabled or a pre-existing TLS secret.
+  enabled: true
+
+  ## Port the manager listens on for webhook requests
+  port: 9443
+
+  ## Failure policy for the mutating webhook (Fail | Ignore)
+  failurePolicy: Fail
+
+  ## Timeout in seconds for webhook calls
+  timeoutSeconds: 10
+
+## cert-manager integration
+## When enabled the chart creates a self-signed Issuer and a Certificate.
+## Disable this and provide your own TLS secret if cert-manager is not installed.
+certManager:
+  enabled: true
+
+  ## Name of the TLS secret that cert-manager will create / that you supply.
+  secretName: litestream-operator-webhook-cert
+
+## Litestream sidecar defaults (used by the operator when injecting)
+litestream:
+  ## Default Litestream image injected into annotated pods.
+  ## Users can override per-SQLiteDB CR via spec.image.
+  defaultImage: litestream/litestream:0.5.14
+
+## Metrics service
+metrics:
+  enabled: true
+  port: 8443

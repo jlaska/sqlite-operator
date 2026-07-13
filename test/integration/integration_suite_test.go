@@ -26,24 +26,24 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/jlaska/sqlite-operator/test/utils"
+	"github.com/jlaska/litestream-operator/test/utils"
 )
 
 const (
-	operatorNamespace = "sqlite-operator-system"
-	testNamespace     = "sqlite-integration"
+	operatorNamespace = "litestream-operator-system"
+	testNamespace     = "litestream-integration"
 
 	// MinIO access credentials (used in Secret and Litestream config).
 	minioUser   = "minioadmin"
 	minioPass   = "minioadmin"
-	minioBucket = "sqlite-backups"
+	minioBucket = "litestream-backups"
 	// minioEndpoint is the in-cluster address Litestream uses.
 	minioEndpoint = "minio." + testNamespace + ".svc.cluster.local:9000"
 )
 
 func TestIntegration(t *testing.T) {
 	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting sqlite-operator integration test suite\n")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting litestream-operator integration test suite\n")
 	RunSpecs(t, "Integration Suite")
 }
 
@@ -122,7 +122,7 @@ func runIgnoreError(name string, args ...string) {
 // applyLiteral writes a YAML string to a temp file and applies it.
 // Fails the test immediately if kubectl exits non-zero.
 func applyLiteral(yaml string) {
-	f, err := os.CreateTemp("", "sqlite-integration-*.yaml")
+	f, err := os.CreateTemp("", "litestream-integration-*.yaml")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	defer func() { _ = os.Remove(f.Name()) }()
 	_, err = f.WriteString(yaml)
@@ -135,7 +135,7 @@ func applyLiteral(yaml string) {
 // (combined output, error) without failing the test. Use when the apply is
 // expected to fail (e.g. webhook rejection tests).
 func applyLiteralQ(yaml string) (string, error) {
-	f, err := os.CreateTemp("", "sqlite-integration-*.yaml")
+	f, err := os.CreateTemp("", "litestream-integration-*.yaml")
 	if err != nil {
 		return "", err
 	}

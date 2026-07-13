@@ -31,7 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
 )
 
 var (

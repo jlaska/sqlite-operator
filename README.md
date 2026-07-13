@@ -1,15 +1,15 @@
-# sqlite-operator
+# litestream-operator
 
-[![Tests](https://github.com/jlaska/sqlite-operator/actions/workflows/test.yml/badge.svg)](https://github.com/jlaska/sqlite-operator/actions/workflows/test.yml)
-[![CI/CD Pipeline](https://github.com/jlaska/sqlite-operator/actions/workflows/ci.yaml/badge.svg)](https://github.com/jlaska/sqlite-operator/actions/workflows/ci.yaml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/jlaska/sqlite-operator)](https://goreportcard.com/report/github.com/jlaska/sqlite-operator)
-[![coverage](https://raw.githubusercontent.com/jlaska/sqlite-operator/badges/.badges/main/coverage.svg)](/.testcoverage.yml)
+[![Tests](https://github.com/jlaska/litestream-operator/actions/workflows/test.yml/badge.svg)](https://github.com/jlaska/litestream-operator/actions/workflows/test.yml)
+[![CI/CD Pipeline](https://github.com/jlaska/litestream-operator/actions/workflows/ci.yaml/badge.svg)](https://github.com/jlaska/litestream-operator/actions/workflows/ci.yaml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/jlaska/litestream-operator)](https://goreportcard.com/report/github.com/jlaska/litestream-operator)
+[![coverage](https://raw.githubusercontent.com/jlaska/litestream-operator/badges/.badges/main/coverage.svg)](/.testcoverage.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Container Image](https://img.shields.io/badge/container-ghcr.io-blue)](https://github.com/jlaska/sqlite-operator/pkgs/container/sqlite-operator)
+[![Container Image](https://img.shields.io/badge/container-ghcr.io-blue)](https://github.com/jlaska/litestream-operator/pkgs/container/litestream-operator)
 
 > **Continuous S3 backup for SQLite databases running in Kubernetes** — no application changes required.
 
-sqlite-operator injects a [Litestream](https://litestream.io) sidecar into your existing application pods, streaming WAL changes to any S3-compatible object store (MinIO, AWS S3, Backblaze B2, …) in real time. Declare a `SQLiteDB` resource, point it at your app's Deployment, and get point-in-time-recoverable database backups without touching your application code.
+litestream-operator injects a [Litestream](https://litestream.io) sidecar into your existing application pods, streaming WAL changes to any S3-compatible object store (MinIO, AWS S3, Backblaze B2, …) in real time. Declare a `LitestreamReplica` resource, point it at your app's Deployment, and get point-in-time-recoverable database backups without touching your application code.
 
 ---
 
@@ -18,9 +18,9 @@ sqlite-operator injects a [Litestream](https://litestream.io) sidecar into your 
 ### 1. Install the operator
 
 ```bash
-helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
-  --version 0.2.0 \
-  --namespace sqlite-operator-system \
+helm install litestream-operator oci://ghcr.io/jlaska/charts/litestream-operator \
+  --version 0.4.0 \
+  --namespace litestream-operator-system \
   --create-namespace
 ```
 
@@ -28,9 +28,9 @@ helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
 >
 > To skip cert-manager (bring your own webhook TLS secret):
 > ```bash
-> helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
->   --version 0.2.0 \
->   --namespace sqlite-operator-system \
+> helm install litestream-operator oci://ghcr.io/jlaska/charts/litestream-operator \
+>   --version 0.4.0 \
+>   --namespace litestream-operator-system \
 >   --create-namespace \
 >   --set certManager.enabled=false \
 >   --set certManager.secretName=my-tls-secret
@@ -45,11 +45,11 @@ kubectl create secret generic minio-creds \
   --namespace my-app
 ```
 
-### 3. Declare a SQLiteDB resource
+### 3. Declare a LitestreamReplica resource
 
 ```yaml
-apiVersion: database.example.com/v1
-kind: SQLiteDB
+apiVersion: litestream.io/v1
+kind: LitestreamReplica
 metadata:
   name: paperless-db
   namespace: paperless
@@ -67,7 +67,7 @@ spec:
     destination:
       s3:
         endpoint: minio.homelab:9000     # omit for AWS S3
-        bucket: sqlite-backups
+        bucket: litestream-backups
         path: paperless/
         secretRef: minio-creds
     retention:
@@ -86,12 +86,12 @@ The operator annotates `paperless-webserver`, which triggers a rolling update. N
 
 ```bash
 # Check injection and backup health
-kubectl get sqlitedb paperless-db -n paperless
+kubectl get litestreamreplica paperless-db -n paperless
 
 # NAME           TARGET                DATABASE       BACKUP  PHASE  READY
 # paperless-db   paperless-webserver   paperless.db   true    Ready  true
 
-kubectl describe sqlitedb paperless-db -n paperless
+kubectl describe litestreamreplica paperless-db -n paperless
 # Conditions:
 #   SidecarInjected  True   Annotated
 #   BackupHealthy    True   SidecarRunning
@@ -102,7 +102,7 @@ kubectl describe sqlitedb paperless-db -n paperless
 
 ## How it works
 
-sqlite-operator is to SQLite what [CloudNativePG](https://cloudnative-pg.io) is to PostgreSQL — a Kubernetes-native orchestration layer that handles backup, lifecycle, and observability at the database layer. Litestream does for SQLite what Barman Cloud does for PostgreSQL.
+litestream-operator is to SQLite what [CloudNativePG](https://cloudnative-pg.io) is to PostgreSQL — a Kubernetes-native orchestration layer that handles backup, lifecycle, and observability at the database layer. Litestream does for SQLite what Barman Cloud does for PostgreSQL.
 
 ```
 ┌─────────────────────────────────────┐
@@ -126,8 +126,8 @@ sqlite-operator is to SQLite what [CloudNativePG](https://cloudnative-pg.io) is 
 
 **Injection flow:**
 
-1. You create a `SQLiteDB` CR pointing at an existing Deployment
-2. The controller annotates the Deployment's pod template (`sqlite.database.example.com/inject: "true"`)
+1. You create a `LitestreamReplica` CR pointing at an existing Deployment
+2. The controller annotates the Deployment's pod template (`litestream.io/inject: "true"`)
 3. The annotation triggers a rolling update — new pods inherit the label
 4. The mutating webhook intercepts pod creation and injects the Litestream sidecar
 5. Litestream streams WAL changes to S3 continuously; the operator monitors sidecar health
@@ -136,7 +136,7 @@ sqlite-operator is to SQLite what [CloudNativePG](https://cloudnative-pg.io) is 
 
 ## CRD reference
 
-### SQLiteDB
+### LitestreamReplica
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -163,23 +163,23 @@ sqlite-operator is to SQLite what [CloudNativePG](https://cloudnative-pg.io) is 
 | `Ready` | Target Deployment has ready replicas |
 
 ```bash
-kubectl get sqlitedb -A
+kubectl get litestreamreplica -A
 # NAMESPACE    NAME          TARGET         DATABASE   BACKUP  PHASE  READY  AGE
 # paperless    paperless-db  paperless-web  app.db     true    Ready  true   3d
 ```
 
-### SQLiteRestore
+### LitestreamRestore
 
-Trigger a point-in-time restore from any `SQLiteDB` backup:
+Trigger a point-in-time restore from any `LitestreamReplica` backup:
 
 ```yaml
-apiVersion: database.example.com/v1
-kind: SQLiteRestore
+apiVersion: litestream.io/v1
+kind: LitestreamRestore
 metadata:
   name: paperless-restore
   namespace: paperless
 spec:
-  sourceRef: paperless-db         # which SQLiteDB's backup to restore from
+  sourceRef: paperless-db         # which LitestreamReplica's backup to restore from
   targetPVC: paperless-restore    # PVC to write the restored database into
   targetPath: /data/paperless.db  # full path including filename
   timestamp: "2026-06-17T10:00:00Z"  # optional: point-in-time recovery
@@ -188,7 +188,7 @@ spec:
 The operator creates a Kubernetes Job that runs `litestream restore`. Monitor progress:
 
 ```bash
-kubectl get sqliterestore paperless-restore -n paperless
+kubectl get litestreamrestore paperless-restore -n paperless
 # NAME                SOURCE         TARGETPVC           PHASE     AGE
 # paperless-restore   paperless-db   paperless-restore   Complete  2m
 ```
@@ -235,7 +235,7 @@ spec:
     enabled: true
     destination:
       s3:
-        bucket: my-sqlite-backups
+        bucket: my-litestream-backups
         path: production/my-app/
         secretRef: aws-creds
 ```
@@ -253,20 +253,20 @@ spec:
 
 ```bash
 # List all available values
-helm show values oci://ghcr.io/jlaska/charts/sqlite-operator --version 0.2.0
+helm show values oci://ghcr.io/jlaska/charts/litestream-operator --version 0.2.0
 ```
 
 Key values:
 
 | Value | Default | Description |
 |---|---|---|
-| `image.repository` | `ghcr.io/jlaska/sqlite-operator` | Operator image |
+| `image.repository` | `ghcr.io/jlaska/litestream-operator` | Operator image |
 | `image.tag` | chart `appVersion` | Image tag |
 | `replicaCount` | `1` | Operator replicas |
 | `webhook.enabled` | `true` | Enable mutating/validating webhooks |
 | `webhook.failurePolicy` | `Fail` | Webhook failure policy |
 | `certManager.enabled` | `true` | Use cert-manager for webhook TLS |
-| `certManager.secretName` | `sqlite-operator-webhook-cert` | TLS secret name |
+| `certManager.secretName` | `litestream-operator-webhook-cert` | TLS secret name |
 | `litestream.defaultImage` | `litestream/litestream:0.5.14` | Default sidecar image |
 
 ---
@@ -275,8 +275,8 @@ Key values:
 
 ```bash
 # Clone and build
-git clone https://github.com/jlaska/sqlite-operator
-cd sqlite-operator
+git clone https://github.com/jlaska/litestream-operator
+cd litestream-operator
 make build
 
 # Run unit tests
@@ -289,8 +289,8 @@ make kind-test-integration
 make docker-build docker-push
 
 # Install CRDs and deploy operator locally (requires KUBECONFIG)
-helm install sqlite-operator charts/sqlite-operator \
-  --namespace sqlite-operator-system \
+helm install litestream-operator charts/litestream-operator \
+  --namespace litestream-operator-system \
   --create-namespace \
   --set image.pullPolicy=Never
 ```

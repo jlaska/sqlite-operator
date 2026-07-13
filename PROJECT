@@ -3,19 +3,19 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.6.0
-domain: example.com
+domain: litestream.io
 layout:
 - go.kubebuilder.io/v4
-projectName: sqlite-operator
-repo: github.com/jlaska/sqlite-operator
+projectName: litestream-operator
+repo: github.com/jlaska/litestream-operator
 resources:
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: example.com
-  group: database
-  kind: SQLiteDB
-  path: github.com/jlaska/sqlite-operator/api/v1
+  domain: litestream.io
+  group: litestream
+  kind: LitestreamReplica
+  path: github.com/jlaska/litestream-operator/api/v1
   version: v1
 version: "3"

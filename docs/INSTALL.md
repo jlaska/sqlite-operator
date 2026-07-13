@@ -1,6 +1,6 @@
-# SQLite Operator Deployment
+# Litestream Operator Deployment
 
-This directory contains Kubernetes manifests for deploying the SQLite Operator using Kustomize.
+This directory contains Kubernetes manifests for deploying the Litestream Operator using Kustomize.
 
 ## Directory Structure
 
@@ -14,10 +14,10 @@ deploy/
 ├── deployment.yaml                # Operator deployment
 ├── service.yaml                   # Metrics service
 ├── controller_manager_config.yaml # Controller configuration
-├── database.example.com_sqlitedbs.yaml # SQLiteDB CRD
+├── litestream.io_litestreamreplicas.yaml # LitestreamReplica CRD
 └── samples/
     ├── kustomization.yaml         # Sample resources kustomization
-    └── sample-sqlitedb.yaml       # Example SQLiteDB resource
+    └── sample-litestreamreplica.yaml       # Example LitestreamReplica resource
 ```
 
 ## Quick Deployment
@@ -29,7 +29,7 @@ deploy/
 kubectl apply -k deploy/
 
 # Verify the operator is running
-kubectl get pods -n sqlite-operator-system
+kubectl get pods -n litestream-operator-system
 ```
 
 ### 2. Create a SQLite Database
@@ -39,8 +39,8 @@ kubectl get pods -n sqlite-operator-system
 kubectl apply -k deploy/samples/
 
 # Check the status
-kubectl get sqlitedb
-kubectl describe sqlitedb example-sqlite
+kubectl get litestreamreplica
+kubectl describe litestreamreplica example-sqlite
 ```
 
 ### 3. Verify the Database is Running
@@ -59,10 +59,10 @@ kubectl exec -it deployment/example-sqlite -- sqlite3 /data/myapp.db ".schema"
 
 ```bash
 # Build the operator image
-make docker-build IMG=your-registry/sqlite-operator:v1.0.0
+make docker-build IMG=your-registry/litestream-operator:v1.0.0
 
 # Push to registry
-make docker-push IMG=your-registry/sqlite-operator:v1.0.0
+make docker-push IMG=your-registry/litestream-operator:v1.0.0
 ```
 
 ### Using Custom Images
@@ -72,17 +72,17 @@ Edit `deploy/kustomization.yaml` to use your custom image:
 ```yaml
 images:
 - name: controller
-  newName: your-registry/sqlite-operator
+  newName: your-registry/litestream-operator
   newTag: v1.0.0
 ```
 
-### Creating Custom SQLiteDB Resources
+### Creating Custom LitestreamReplica Resources
 
-Example SQLiteDB resource:
+Example LitestreamReplica resource:
 
 ```yaml
-apiVersion: database.example.com/v1
-kind: SQLiteDB
+apiVersion: litestream.io/v1
+kind: LitestreamReplica
 metadata:
   name: my-database
   namespace: my-namespace
@@ -102,7 +102,7 @@ spec:
   backupSchedule: "0 2 * * *"
 ```
 
-## SQLiteDB Spec Fields
+## LitestreamReplica Spec Fields
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
@@ -114,7 +114,7 @@ spec:
 | `backupEnabled` | bool | Enable automatic backups | No |
 | `backupSchedule` | string | Backup schedule in cron format | No |
 
-## SQLiteDB Status Fields
+## LitestreamReplica Status Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -133,8 +133,8 @@ The operator exposes metrics on port 8443. You can scrape these metrics using Pr
 apiVersion: v1
 kind: Service
 metadata:
-  name: sqlite-operator-metrics
-  namespace: sqlite-operator-system
+  name: litestream-operator-metrics
+  namespace: litestream-operator-system
 spec:
   ports:
   - name: https
@@ -149,19 +149,19 @@ spec:
 ### Check Operator Logs
 
 ```bash
-kubectl logs -n sqlite-operator-system deployment/sqlite-operator-controller-manager -c manager
+kubectl logs -n litestream-operator-system deployment/litestream-operator-controller-manager -c manager
 ```
 
-### Check SQLiteDB Events
+### Check LitestreamReplica Events
 
 ```bash
-kubectl describe sqlitedb <name>
+kubectl describe litestreamreplica <name>
 ```
 
 ### Check Created Resources
 
 ```bash
-kubectl get all -l app=<sqlitedb-name>
+kubectl get all -l app=<litestreamreplica-name>
 ```
 
 ## ArgoCD Integration
@@ -172,17 +172,17 @@ This operator works well with ArgoCD. Create an Application pointing to the `dep
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: sqlite-operator
+  name: litestream-operator
   namespace: argocd
 spec:
   project: default
   source:
-    repoURL: https://your-repo/sqlite-operator.git
+    repoURL: https://your-repo/litestream-operator.git
     targetRevision: HEAD
     path: deploy
   destination:
     server: https://kubernetes.default.svc
-    namespace: sqlite-operator-system
+    namespace: litestream-operator-system
   syncPolicy:
     automated:
       prune: true

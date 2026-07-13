@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
 )
 
 // litestreamContainerName is the name given to the injected sidecar container.
@@ -50,11 +50,11 @@ const injectTrue = "true"
 // archiveCheckContainerName is the name of the archive-check init container.
 const archiveCheckContainerName = "litestream-archive-check"
 
-// sqliteInitContainerName is the name given to the injected init container.
-const sqliteInitContainerName = "sqlite-init"
+// dbInitContainerName is the name given to the injected init container.
+const dbInitContainerName = "db-init"
 
-// sqliteInitSQLVolume is the name of the volume that mounts init.sql.
-const sqliteInitSQLVolume = "sqlite-init-sql"
+// dbInitSQLVolume is the name of the volume that mounts init.sql.
+const dbInitSQLVolume = "db-init-sql"
 
 // SidecarInjector is a mutating admission webhook that injects a Litestream
 // replication sidecar into pods belonging to annotated Deployments.
@@ -84,17 +84,17 @@ func (s *SidecarInjector) Handle(ctx context.Context, req admission.Request) adm
 		return admission.Allowed("sidecar already present")
 	}
 
-	// Resolve the SQLiteDB CR from the config annotation.
-	sqliteDB, err := s.resolveSQLiteDB(ctx, pod, req.Namespace)
+	// Resolve the LitestreamReplica CR from the config annotation.
+	db, err := s.resolveLitestreamReplica(ctx, pod, req.Namespace)
 	if err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-	if sqliteDB == nil {
-		return admission.Allowed("no SQLiteDB config reference found")
+	if db == nil {
+		return admission.Allowed("no LitestreamReplica config reference found")
 	}
 
 	// Inject the sidecar and return the patch.
-	if err := s.inject(pod, sqliteDB); err != nil {
+	if err := s.inject(pod, db); err != nil {
 		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("injecting sidecar: %w", err))
 	}
 
@@ -116,10 +116,10 @@ func (s *SidecarInjector) alreadyInjected(pod *corev1.Pod) bool {
 	return false
 }
 
-// resolveSQLiteDB looks up the SQLiteDB CR referenced by the config annotation.
+// resolveLitestreamReplica looks up the LitestreamReplica CR referenced by the config annotation.
 // The annotation value is "namespace/name". Returns nil (no error) when the
 // annotation is absent.
-func (s *SidecarInjector) resolveSQLiteDB(ctx context.Context, pod *corev1.Pod, podNamespace string) (*databasev1.SQLiteDB, error) {
+func (s *SidecarInjector) resolveLitestreamReplica(ctx context.Context, pod *corev1.Pod, podNamespace string) (*databasev1.LitestreamReplica, error) {
 	ref := pod.Annotations[databasev1.AnnotationConfig]
 	if ref == "" {
 		return nil, nil
@@ -133,9 +133,9 @@ func (s *SidecarInjector) resolveSQLiteDB(ctx context.Context, pod *corev1.Pod, 
 		ns = podNamespace
 	}
 
-	db := &databasev1.SQLiteDB{}
+	db := &databasev1.LitestreamReplica{}
 	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, db); err != nil {
-		return nil, fmt.Errorf("getting SQLiteDB %s/%s: %w", ns, name, err)
+		return nil, fmt.Errorf("getting LitestreamReplica %s/%s: %w", ns, name, err)
 	}
 	return db, nil
 }
@@ -146,7 +146,7 @@ func (s *SidecarInjector) resolveSQLiteDB(ctx context.Context, pod *corev1.Pod, 
 const defaultEphemeralStorageLimit = "1Gi"
 
 // inject mutates the pod spec in-place to add the Litestream sidecar.
-func (s *SidecarInjector) inject(pod *corev1.Pod, db *databasev1.SQLiteDB) error {
+func (s *SidecarInjector) inject(pod *corev1.Pod, db *databasev1.LitestreamReplica) error {
 	// The sidecar shares the volume that already mounts the database path.
 	// We look for a volume mount in the first container that covers databasePath.
 	volumeName, err := s.findVolumeForPath(pod, db.Spec.DatabasePath)
@@ -237,7 +237,7 @@ func (s *SidecarInjector) inject(pod *corev1.Pod, db *databasev1.SQLiteDB) error
 // litestreamResources returns the resource requirements for the Litestream sidecar.
 // When the user has not specified resources, a default ephemeral-storage limit is
 // applied to surface the silent disk-fill failure mode (upstream #1310).
-func litestreamResources(db *databasev1.SQLiteDB) corev1.ResourceRequirements {
+func litestreamResources(db *databasev1.LitestreamReplica) corev1.ResourceRequirements {
 	if db.Spec.Backup.Resources != nil {
 		return *db.Spec.Backup.Resources
 	}
@@ -274,7 +274,7 @@ func buildLitestreamInitContainer(name, script, image, dbPath, dataVolumeName st
 // "empty WAL archive check" pattern.
 //
 // The check runs before the app starts, so there is no race with app DB initialization.
-func (s *SidecarInjector) injectArchiveCheckContainer(pod *corev1.Pod, db *databasev1.SQLiteDB, dataVolumeName string) {
+func (s *SidecarInjector) injectArchiveCheckContainer(pod *corev1.Pod, db *databasev1.LitestreamReplica, dataVolumeName string) {
 	image := db.Spec.Image
 	if image == "" {
 		image = litestreamDefaultImage
@@ -304,8 +304,8 @@ if litestream restore -config /etc/litestream/litestream.yml -o "${PROBE}" "${DB
   rm -f "${PROBE}"
   echo "archive-check FAILED: S3 has existing backup data but local database is missing."
   echo "This likely means data was lost (PVC wiped or DB deleted)."
-  echo "To recover: create a SQLiteRestore CR targeting this PVC."
-  echo "To bypass (start fresh): set annotation sqlite.database.example.com/skip-archive-check=true"
+  echo "To recover: create a LitestreamRestore CR targeting this PVC."
+  echo "To bypass (start fresh): set annotation litestream.io/skip-archive-check=true"
   exit 1
 fi
 rm -f "${PROBE}"
@@ -329,7 +329,7 @@ exit 0
 //
 // This replaces the archive-check container when spec.backup.autoRestore=true.
 // The integrity gate mitigates known Litestream restore corruption issues (#1164, #1220).
-func (s *SidecarInjector) injectAutoRestoreContainer(pod *corev1.Pod, db *databasev1.SQLiteDB, dataVolumeName string) {
+func (s *SidecarInjector) injectAutoRestoreContainer(pod *corev1.Pod, db *databasev1.LitestreamReplica, dataVolumeName string) {
 	image := db.Spec.Image
 	if image == "" {
 		image = litestreamDefaultImage
@@ -367,8 +367,8 @@ if ! sqlite3 "${DB_PATH}" "PRAGMA quick_check;" | grep -q "^ok$"; then
   echo "ERROR: integrity check failed on restored database."
   echo "The S3 backup may contain corruption (Litestream upstream issue #1164/#1220)."
   echo "Options:"
-  echo "  1. Use a SQLiteRestore CR with a different -timestamp to find a clean snapshot."
-  echo "  2. Set annotation sqlite.database.example.com/skip-archive-check=true to start fresh."
+  echo "  1. Use a LitestreamRestore CR with a different -timestamp to find a clean snapshot."
+  echo "  2. Set annotation litestream.io/skip-archive-check=true to start fresh."
   exit 1
 fi
 echo "litestream-restore: integrity check passed"
@@ -410,10 +410,10 @@ func s3CredsEnvVars(secretRef string) []corev1.EnvVar {
 
 // injectInitContainer adds an init container that applies InitSQL to the
 // database exactly once, guarded by a SHA-256 hash marker file on the PVC.
-// The marker file lives at {databasePath}/.sqlite-init-{hash} so it persists
+// The marker file lives at {databasePath}/.db-init-{hash} so it persists
 // across pod restarts; a change in InitSQL produces a new hash and a new
 // marker, triggering re-application on the next rollout.
-func (s *SidecarInjector) injectInitContainer(pod *corev1.Pod, db *databasev1.SQLiteDB, dataVolumeName string) {
+func (s *SidecarInjector) injectInitContainer(pod *corev1.Pod, db *databasev1.LitestreamReplica, dataVolumeName string) {
 	initImage := db.Spec.InitImage
 	if initImage == "" {
 		initImage = "keinos/sqlite3:latest"
@@ -427,18 +427,18 @@ func (s *SidecarInjector) injectInitContainer(pod *corev1.Pod, db *databasev1.SQ
 	//   3. Exit 0 in both cases so pod startup is never blocked by a prior run.
 	script := fmt.Sprintf(`
 HASH=$(sha256sum /init/init.sql | cut -d' ' -f1)
-MARKER="%s/.sqlite-init-${HASH}"
+MARKER="%s/.db-init-${HASH}"
 if [ ! -f "${MARKER}" ]; then
   sqlite3 "%s" < /init/init.sql
   touch "${MARKER}"
-  echo "sqlite-init: applied init SQL (hash ${HASH})"
+  echo "db-init: applied init SQL (hash ${HASH})"
 else
-  echo "sqlite-init: already applied (hash ${HASH}), skipping"
+  echo "db-init: already applied (hash ${HASH}), skipping"
 fi
 `, db.Spec.DatabasePath, dbFullPath)
 
 	initContainer := corev1.Container{
-		Name:    sqliteInitContainerName,
+		Name:    dbInitContainerName,
 		Image:   initImage,
 		Command: []string{"sh", "-c", script},
 		VolumeMounts: []corev1.VolumeMount{
@@ -447,7 +447,7 @@ fi
 				MountPath: db.Spec.DatabasePath,
 			},
 			{
-				Name:      sqliteInitSQLVolume,
+				Name:      dbInitSQLVolume,
 				MountPath: "/init",
 				ReadOnly:  true,
 			},
@@ -457,7 +457,7 @@ fi
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 
 	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-		Name: sqliteInitSQLVolume,
+		Name: dbInitSQLVolume,
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{

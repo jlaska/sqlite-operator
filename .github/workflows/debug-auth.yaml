@@ -5,7 +5,7 @@ on:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: jlaska/sqlite-operator
+  IMAGE_NAME: jlaska/litestream-operator
 
 jobs:
   debug-auth:

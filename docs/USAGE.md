@@ -1,6 +1,6 @@
-# SQLite Operator Usage Guide
+# Litestream Operator Usage Guide
 
-This guide demonstrates how to use the SQLite Operator to create SQLite databases and connect applications to them.
+This guide demonstrates how to use the Litestream Operator to create SQLite databases and connect applications to them.
 
 ## Table of Contents
 
@@ -18,8 +18,8 @@ This guide demonstrates how to use the SQLite Operator to create SQLite database
 Create a simple SQLite database with default settings:
 
 ```yaml
-apiVersion: database.example.com/v1
-kind: SQLiteDB
+apiVersion: litestream.io/v1
+kind: LitestreamReplica
 metadata:
   name: my-app-db
   namespace: default
@@ -35,8 +35,8 @@ This creates:
 ### SQLite Database with Custom Storage
 
 ```yaml
-apiVersion: database.example.com/v1
-kind: SQLiteDB
+apiVersion: litestream.io/v1
+kind: LitestreamReplica
 metadata:
   name: production-db
   namespace: myapp
@@ -92,13 +92,13 @@ spec:
       volumes:
       - name: sqlite-storage
         persistentVolumeClaim:
-          claimName: my-app-db-storage  # Reference the SQLiteDB's PVC
+          claimName: my-app-db-storage  # Reference the LitestreamReplica's PVC
 ```
 
 **Important Notes:**
 - Use `replicas: 1` to avoid SQLite locking issues (SQLite doesn't support concurrent writes)
 - The database file path is `/data/{databaseName}.db`
-- Mount the PVC with the same name pattern: `{sqlitedb-name}-storage`
+- Mount the PVC with the same name pattern: `{litestreamreplica-name}-storage`
 
 ### Method 2: Init Container Pattern
 
@@ -284,8 +284,8 @@ Complete example of a web application using SQLite:
 
 ```yaml
 # 1. Create the SQLite database
-apiVersion: database.example.com/v1
-kind: SQLiteDB
+apiVersion: litestream.io/v1
+kind: LitestreamReplica
 metadata:
   name: webapp-db
   namespace: production
@@ -464,9 +464,9 @@ kubectl get storageclass
 ### Debugging Commands
 
 ```bash
-# Check SQLiteDB status
-kubectl get sqlitedb
-kubectl describe sqlitedb my-app-db
+# Check LitestreamReplica status
+kubectl get litestreamreplica
+kubectl describe litestreamreplica my-app-db
 
 # Check PVC status
 kubectl get pvc

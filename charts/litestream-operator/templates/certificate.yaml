@@ -1,0 +1,28 @@
+{{- if and .Values.webhook.enabled .Values.certManager.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "litestream-operator.fullname" . }}-selfsigned
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "litestream-operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "litestream-operator.certName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "litestream-operator.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "litestream-operator.webhookServiceName" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "litestream-operator.webhookServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "litestream-operator.fullname" . }}-selfsigned
+  secretName: {{ include "litestream-operator.webhookSecretName" . }}
+{{- end }}
