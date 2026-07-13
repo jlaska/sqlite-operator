@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -55,9 +54,10 @@ const (
 )
 
 const (
-	injectEnabled    = "true"
-	pausedConfig     = "dbs: []\n"
-	litestreamSidecar = "litestream"
+	injectEnabled       = "true"
+	pausedConfig        = "dbs: []\n"
+	litestreamSidecar   = "litestream"
+	litestreamConfigKey = "litestream.yml"
 )
 
 // SQLiteDBReconciler reconciles a SQLiteDB object
@@ -71,6 +71,7 @@ type SQLiteDBReconciler struct {
 // +kubebuilder:rbac:groups=database.example.com,resources=sqlitedbs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=database.example.com,resources=sqlitedbs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
@@ -86,7 +87,11 @@ func (r *SQLiteDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Reconciling SQLiteDB", "target", sqliteDB.Spec.TargetDeployment)
+	target := sqliteDB.Spec.TargetDeployment
+	if sqliteDB.Spec.TargetStatefulSet != "" {
+		target = sqliteDB.Spec.TargetStatefulSet
+	}
+	log.Info("Reconciling SQLiteDB", "target", target)
 
 	if err := r.reconcileLitestreamConfig(ctx, sqliteDB); err != nil {
 		log.Error(err, "Failed to reconcile Litestream ConfigMap")
@@ -99,7 +104,7 @@ func (r *SQLiteDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	if err := r.reconcileTargetAnnotation(ctx, sqliteDB); err != nil {
-		log.Error(err, "Failed to annotate target Deployment")
+		log.Error(err, "Failed to annotate target workload")
 		return ctrl.Result{}, err
 	}
 
@@ -131,7 +136,7 @@ func (r *SQLiteDBReconciler) reconcileLitestreamConfig(ctx context.Context, sqli
 			config = r.buildLitestreamConfig(sqliteDB)
 		}
 		cm.Data = map[string]string{
-			"litestream.yml": config,
+			litestreamConfigKey: config,
 		}
 		return controllerutil.SetControllerReference(sqliteDB, cm, r.Scheme)
 	})
@@ -152,7 +157,11 @@ func (r *SQLiteDBReconciler) buildLitestreamConfig(sqliteDB *databasev1.SQLiteDB
 func buildLitestreamConfigYAML(sqliteDB *databasev1.SQLiteDB) string {
 	dbPath := fmt.Sprintf("%s/%s", sqliteDB.Spec.DatabasePath, sqliteDB.Spec.DatabaseName)
 
-	cfg := fmt.Sprintf("dbs:\n  - path: %s\n", dbPath)
+	// Global settings: Prometheus metrics endpoint (upstream guide recommendation).
+	cfg := "addr: \":9090\"\n"
+
+	// Per-database config.
+	cfg += fmt.Sprintf("dbs:\n  - path: %s\n", dbPath)
 
 	if sqliteDB.Spec.Backup.Enabled && sqliteDB.Spec.Backup.Destination.S3 != nil {
 		s3 := sqliteDB.Spec.Backup.Destination.S3
@@ -179,6 +188,9 @@ func buildLitestreamConfigYAML(sqliteDB *databasev1.SQLiteDB) string {
 		}
 		if sqliteDB.Spec.Backup.Retention.Duration != "" {
 			cfg += fmt.Sprintf("      retention: %s\n", sqliteDB.Spec.Backup.Retention.Duration)
+		}
+		if sqliteDB.Spec.Backup.SyncInterval != "" {
+			cfg += fmt.Sprintf("      sync-interval: %s\n", sqliteDB.Spec.Backup.SyncInterval)
 		}
 	}
 
@@ -244,22 +256,30 @@ func (r *SQLiteDBReconciler) reconcileInitSQLConfig(ctx context.Context, sqliteD
 	return r.Status().Patch(ctx, sqliteDB, patch)
 }
 
-// reconcileTargetAnnotation adds injection annotations to the target
-// Deployment's pod template, triggering a rolling restart so new pods
-// inherit them and the mutating webhook can inject the Litestream sidecar.
+// reconcileTargetAnnotation adds injection annotations to the target workload's
+// pod template, triggering a rolling restart so new pods inherit them and the
+// mutating webhook can inject the Litestream sidecar.
+// If the target workload has more than one replica, the annotation is skipped
+// and an event is emitted — Litestream requires exactly one writer.
 func (r *SQLiteDBReconciler) reconcileTargetAnnotation(ctx context.Context, sqliteDB *databasev1.SQLiteDB) error {
-	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: sqliteDB.Namespace,
-		Name:      sqliteDB.Spec.TargetDeployment,
-	}, deployment); err != nil {
-		return fmt.Errorf("target Deployment %q not found: %w", sqliteDB.Spec.TargetDeployment, err)
+	wt, err := r.getTargetWorkload(ctx, sqliteDB)
+	if err != nil {
+		return err
+	}
+
+	// Litestream requires exactly one writer. Emit a warning event and skip
+	// annotation; updateStatus will set phase=Error with ConditionReplicaCountExceeded.
+	if wt.desiredReplicas() > 1 {
+		r.Recorder.Eventf(sqliteDB, corev1.EventTypeWarning, "ReplicaCountExceeded",
+			"target %s %q has %d replicas; Litestream requires exactly 1 writer",
+			wt.typeName(), wt.name(), wt.desiredReplicas())
+		return nil
 	}
 
 	configRef := fmt.Sprintf("%s/%s", sqliteDB.Namespace, sqliteDB.Name)
 
-	tmplAnnotations := deployment.Spec.Template.Annotations
-	tmplLabels := deployment.Spec.Template.Labels
+	tmplAnnotations := wt.podTemplateAnnotations()
+	tmplLabels := wt.podTemplateLabels()
 	// Both annotation and label must be present: the annotation carries the
 	// config ref (read by the webhook handler), and the label enables the
 	// MutatingWebhookConfiguration's objectSelector to route the pod to the
@@ -270,33 +290,27 @@ func (r *SQLiteDBReconciler) reconcileTargetAnnotation(ctx context.Context, sqli
 		return nil
 	}
 
-	patch := client.MergeFrom(deployment.DeepCopy())
-
-	if deployment.Spec.Template.Annotations == nil {
-		deployment.Spec.Template.Annotations = map[string]string{}
-	}
-	deployment.Spec.Template.Annotations[injectAnnotation] = injectEnabled
-	deployment.Spec.Template.Annotations[configAnnotation] = configRef
-
-	// Mirror the inject signal as a label so the webhook objectSelector fires.
-	if deployment.Spec.Template.Labels == nil {
-		deployment.Spec.Template.Labels = map[string]string{}
-	}
-	deployment.Spec.Template.Labels[injectAnnotation] = injectEnabled
-
-	return r.Patch(ctx, deployment, patch)
+	return r.patchWorkloadPodTemplate(ctx, wt,
+		map[string]string{
+			injectAnnotation: injectEnabled,
+			configAnnotation: configRef,
+		},
+		map[string]string{
+			injectAnnotation: injectEnabled,
+		},
+	)
 }
 
-// litestreamContainerState inspects pods belonging to the target Deployment
+// litestreamContainerState inspects pods belonging to the target workload
 // and returns the state of the Litestream sidecar container across all
 // running pods. It returns (healthy, message) where healthy is true only
 // when at least one pod has the sidecar in a Running state and no pods have
 // it in a terminal failure state (CrashLoopBackOff / OOMKilled / Error).
-func (r *SQLiteDBReconciler) litestreamContainerState(ctx context.Context, sqliteDB *databasev1.SQLiteDB, deployment *appsv1.Deployment) (healthy bool, message string) {
+func (r *SQLiteDBReconciler) litestreamContainerState(ctx context.Context, sqliteDB *databasev1.SQLiteDB, wt *workloadTarget) (healthy bool, message string) {
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(sqliteDB.Namespace),
-		client.MatchingLabels(deployment.Spec.Selector.MatchLabels),
+		client.MatchingLabels(wt.selectorLabels()),
 	); err != nil {
 		return false, fmt.Sprintf("failed to list pods: %v", err)
 	}
@@ -352,11 +366,7 @@ func isFailureReason(reason string) bool {
 // updateStatus computes and writes the status subresource for the SQLiteDB,
 // including sidecar injection state and backup health from live pod inspection.
 func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databasev1.SQLiteDB) error {
-	deployment := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{
-		Namespace: sqliteDB.Namespace,
-		Name:      sqliteDB.Spec.TargetDeployment,
-	}, deployment)
+	wt, err := r.getTargetWorkload(ctx, sqliteDB)
 
 	patch := client.MergeFrom(sqliteDB.DeepCopy())
 	now := metav1.Now()
@@ -366,18 +376,33 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 		sqliteDB.Status.Phase = databasev1.PhaseError
 		sqliteDB.Status.Ready = false
 		sqliteDB.Status.BackupHealthy = false
+		notFoundReason := "WorkloadNotFound"
+		notFoundMsg := fmt.Sprintf("target workload not found: %v", err)
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionSidecarInjected,
-			metav1.ConditionFalse, "DeploymentNotFound",
-			fmt.Sprintf("target Deployment %q not found", sqliteDB.Spec.TargetDeployment),
+			metav1.ConditionFalse, notFoundReason, notFoundMsg,
 			sqliteDB.Generation, now)
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionBackupHealthy,
-			metav1.ConditionFalse, "DeploymentNotFound", "target Deployment not found",
+			metav1.ConditionFalse, notFoundReason, notFoundMsg,
 			sqliteDB.Generation, now)
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReady,
-			metav1.ConditionFalse, "DeploymentNotFound", "target Deployment not found",
+			metav1.ConditionFalse, notFoundReason, notFoundMsg,
 			sqliteDB.Generation, now)
 		return r.Status().Patch(ctx, sqliteDB, patch)
 	}
+
+	// --- Replica count guard: Litestream requires exactly one writer ---
+	if wt.desiredReplicas() > 1 {
+		sqliteDB.Status.Phase = databasev1.PhaseError
+		sqliteDB.Status.Ready = false
+		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReplicaCountExceeded,
+			metav1.ConditionTrue, "TooManyReplicas",
+			fmt.Sprintf("target %s %q has %d replicas; Litestream requires exactly 1 writer",
+				wt.typeName(), wt.name(), wt.desiredReplicas()),
+			sqliteDB.Generation, now)
+		return r.Status().Patch(ctx, sqliteDB, patch)
+	}
+	// Clear the condition when replicas are back to 1.
+	meta.RemoveStatusCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReplicaCountExceeded)
 
 	// --- ReplicationPaused condition ---
 	isPaused := sqliteDB.Annotations[pauseAnnotation] == injectEnabled
@@ -394,7 +419,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 	}
 
 	// --- ArchiveCheckFailed condition (from archive-check init container status) ---
-	if archiveCheckFailed, msg := r.archiveCheckState(ctx, sqliteDB, deployment); archiveCheckFailed {
+	if archiveCheckFailed, msg := r.archiveCheckState(ctx, sqliteDB, wt); archiveCheckFailed {
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionArchiveCheckFailed,
 			metav1.ConditionTrue, "ArchiveCheckFailed", msg,
 			sqliteDB.Generation, now)
@@ -408,23 +433,23 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 	}
 
 	// --- SidecarInjected condition ---
-	annotated := deployment.Spec.Template.Annotations[injectAnnotation] == injectEnabled
+	annotated := wt.podTemplateAnnotations()[injectAnnotation] == injectEnabled
 	if annotated {
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionSidecarInjected,
 			metav1.ConditionTrue, "Annotated",
-			"target Deployment is annotated for sidecar injection",
+			fmt.Sprintf("target %s is annotated for sidecar injection", wt.typeName()),
 			sqliteDB.Generation, now)
 	} else {
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionSidecarInjected,
 			metav1.ConditionFalse, "AnnotationPending",
-			"injection annotation not yet applied to target Deployment",
+			fmt.Sprintf("injection annotation not yet applied to target %s", wt.typeName()),
 			sqliteDB.Generation, now)
 	}
 
 	// --- BackupHealthy condition (pod inspection) ---
 	prevHealthy := sqliteDB.Status.BackupHealthy
 	if sqliteDB.Spec.Backup.Enabled {
-		healthy, msg := r.litestreamContainerState(ctx, sqliteDB, deployment)
+		healthy, msg := r.litestreamContainerState(ctx, sqliteDB, wt)
 		sqliteDB.Status.BackupHealthy = healthy
 
 		condStatus := metav1.ConditionFalse
@@ -463,19 +488,19 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 	}
 
 	// --- Ready condition ---
-	if annotated && deployment.Status.ReadyReplicas > 0 {
+	if annotated && wt.readyReplicas() > 0 {
 		sqliteDB.Status.Phase = databasev1.PhaseReady
 		sqliteDB.Status.Ready = true
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReady,
-			metav1.ConditionTrue, "DeploymentReady",
-			"target Deployment has ready replicas",
+			metav1.ConditionTrue, "WorkloadReady",
+			fmt.Sprintf("target %s has ready replicas", wt.typeName()),
 			sqliteDB.Generation, now)
 	} else {
 		sqliteDB.Status.Phase = databasev1.PhasePending
 		sqliteDB.Status.Ready = false
 		setCondition(&sqliteDB.Status.Conditions, databasev1.ConditionReady,
-			metav1.ConditionFalse, "DeploymentNotReady",
-			"waiting for target Deployment to have ready replicas",
+			metav1.ConditionFalse, "WorkloadNotReady",
+			fmt.Sprintf("waiting for target %s to have ready replicas", wt.typeName()),
 			sqliteDB.Generation, now)
 	}
 
@@ -485,7 +510,7 @@ func (r *SQLiteDBReconciler) updateStatus(ctx context.Context, sqliteDB *databas
 // archiveCheckState inspects pods to detect whether the archive-check init container
 // has failed. Returns (failed, message). A failure means the DB is missing but S3
 // has existing backup data — the pod is blocked until a SQLiteRestore resolves it.
-func (r *SQLiteDBReconciler) archiveCheckState(ctx context.Context, sqliteDB *databasev1.SQLiteDB, deployment *appsv1.Deployment) (bool, string) {
+func (r *SQLiteDBReconciler) archiveCheckState(ctx context.Context, sqliteDB *databasev1.SQLiteDB, wt *workloadTarget) (bool, string) {
 	if !sqliteDB.Spec.Backup.Enabled {
 		return false, "backup not enabled"
 	}
@@ -493,7 +518,7 @@ func (r *SQLiteDBReconciler) archiveCheckState(ctx context.Context, sqliteDB *da
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(sqliteDB.Namespace),
-		client.MatchingLabels(deployment.Spec.Selector.MatchLabels),
+		client.MatchingLabels(wt.selectorLabels()),
 	); err != nil {
 		return false, fmt.Sprintf("failed to list pods: %v", err)
 	}

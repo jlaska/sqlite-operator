@@ -25,6 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// LitestreamDefaultImage is the default Litestream container image used by the sidecar and restore jobs.
+const LitestreamDefaultImage = "litestream/litestream:0.5.14"
+
 var (
 	// GroupVersion is group version used to register these objects.
 	GroupVersion = schema.GroupVersion{Group: "database.example.com", Version: "v1"}

@@ -61,6 +61,20 @@ spec:
               backup:
                 description: Backup defines the Litestream replication / backup configuration.
                 properties:
+                  autoRestore:
+                    default: false
+                    description: |-
+                      AutoRestore, when true, replaces the archive-check init container with an
+                      upstream-style restore init container that automatically restores the database
+                      from S3 on pod startup (if the local DB is missing and a backup exists).
+                      A PRAGMA quick_check integrity gate is always run after restore; if it fails,
+                      the pod is blocked from starting.
+
+                      WARNING: Litestream has known restore corruption issues (#1164, #1220).
+                      The integrity gate catches corruption before the app starts. When false
+                      (the default), pod startup is blocked if S3 has data but the local DB is
+                      missing, requiring explicit recovery via a SQLiteRestore CR.
+                    type: boolean
                   destination:
                     description: Destination specifies where backups are stored.
                     properties:
@@ -94,6 +108,80 @@ spec:
                     description: Enabled controls whether Litestream replication is
                       active.
                     type: boolean
+                  logLevel:
+                    description: |-
+                      LogLevel sets the Litestream logging verbosity via the LITESTREAM_LOG_LEVEL
+                      environment variable. Valid values: "debug", "info", "warn", "error".
+                      When empty, Litestream's default ("info") is used.
+                    enum:
+                    - debug
+                    - info
+                    - warn
+                    - error
+                    - ""
+                    type: string
+                  resources:
+                    description: |-
+                      Resources specifies the compute resource requirements for the Litestream
+                      sidecar container. When omitted, a default ephemeral-storage limit is applied
+                      to guard against silent disk-fill (upstream issue #1310).
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
                   retention:
                     description: Retention controls how long backup data is kept.
                     properties:
@@ -105,6 +193,13 @@ spec:
                           Litestream 0.5.x uses duration-based retention.
                         type: string
                     type: object
+                  syncInterval:
+                    description: |-
+                      SyncInterval overrides the Litestream sync-interval config key, controlling
+                      how frequently WAL changes are synced to the replica. Expressed as a Go
+                      duration string (e.g. "1s", "500ms"). When empty, the Litestream default (1s)
+                      is used and the key is omitted from the generated config.
+                    type: string
                 required:
                 - enabled
                 type: object
@@ -141,11 +236,17 @@ spec:
                 description: |-
                   TargetDeployment is the name of the existing Deployment in this namespace
                   that the Litestream sidecar should be injected into.
+                  Mutually exclusive with TargetStatefulSet.
+                type: string
+              targetStatefulSet:
+                description: |-
+                  TargetStatefulSet is the name of an existing StatefulSet in this namespace
+                  that the Litestream sidecar should be injected into.
+                  Mutually exclusive with TargetDeployment.
                 type: string
             required:
             - databaseName
             - databasePath
-            - targetDeployment
             type: object
           status:
             description: SQLiteDBStatus defines the observed state of SQLiteDB.

@@ -120,6 +120,7 @@ func runIgnoreError(name string, args ...string) {
 }
 
 // applyLiteral writes a YAML string to a temp file and applies it.
+// Fails the test immediately if kubectl exits non-zero.
 func applyLiteral(yaml string) {
 	f, err := os.CreateTemp("", "sqlite-integration-*.yaml")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
@@ -128,6 +129,22 @@ func applyLiteral(yaml string) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	_ = f.Close()
 	kubectl("apply", "-f", f.Name())
+}
+
+// applyLiteralQ writes a YAML string to a temp file and applies it, returning
+// (combined output, error) without failing the test. Use when the apply is
+// expected to fail (e.g. webhook rejection tests).
+func applyLiteralQ(yaml string) (string, error) {
+	f, err := os.CreateTemp("", "sqlite-integration-*.yaml")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	if _, err = f.WriteString(yaml); err != nil {
+		return "", err
+	}
+	_ = f.Close()
+	return kubectlQ("apply", "-f", f.Name())
 }
 
 // ── static manifests ───────────────────────────────────────────────────────

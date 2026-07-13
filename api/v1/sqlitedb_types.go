@@ -17,6 +17,7 @@ limitations under the License.
 package v1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -66,6 +67,36 @@ type BackupSpec struct {
 
 	// Retention controls how long backup data is kept.
 	Retention RetentionPolicy `json:"retention,omitempty"`
+
+	// SyncInterval overrides the Litestream sync-interval config key, controlling
+	// how frequently WAL changes are synced to the replica. Expressed as a Go
+	// duration string (e.g. "1s", "500ms"). When empty, the Litestream default (1s)
+	// is used and the key is omitted from the generated config.
+	SyncInterval string `json:"syncInterval,omitempty"`
+
+	// LogLevel sets the Litestream logging verbosity via the LITESTREAM_LOG_LEVEL
+	// environment variable. Valid values: "debug", "info", "warn", "error".
+	// When empty, Litestream's default ("info") is used.
+	// +kubebuilder:validation:Enum=debug;info;warn;error;""
+	LogLevel string `json:"logLevel,omitempty"`
+
+	// Resources specifies the compute resource requirements for the Litestream
+	// sidecar container. When omitted, a default ephemeral-storage limit is applied
+	// to guard against silent disk-fill (upstream issue #1310).
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// AutoRestore, when true, replaces the archive-check init container with an
+	// upstream-style restore init container that automatically restores the database
+	// from S3 on pod startup (if the local DB is missing and a backup exists).
+	// A PRAGMA quick_check integrity gate is always run after restore; if it fails,
+	// the pod is blocked from starting.
+	//
+	// WARNING: Litestream has known restore corruption issues (#1164, #1220).
+	// The integrity gate catches corruption before the app starts. When false
+	// (the default), pod startup is blocked if S3 has data but the local DB is
+	// missing, requiring explicit recovery via a SQLiteRestore CR.
+	// +kubebuilder:default=false
+	AutoRestore bool `json:"autoRestore,omitempty"`
 }
 
 // SQLiteDBSpec defines the desired state of SQLiteDB.
@@ -82,8 +113,13 @@ type SQLiteDBSpec struct {
 
 	// TargetDeployment is the name of the existing Deployment in this namespace
 	// that the Litestream sidecar should be injected into.
-	// +kubebuilder:validation:Required
-	TargetDeployment string `json:"targetDeployment"`
+	// Mutually exclusive with TargetStatefulSet.
+	TargetDeployment string `json:"targetDeployment,omitempty"`
+
+	// TargetStatefulSet is the name of an existing StatefulSet in this namespace
+	// that the Litestream sidecar should be injected into.
+	// Mutually exclusive with TargetDeployment.
+	TargetStatefulSet string `json:"targetStatefulSet,omitempty"`
 
 	// Image overrides the Litestream container image used for the sidecar.
 	// +kubebuilder:default="litestream/litestream:0.5.14"
@@ -149,6 +185,11 @@ const (
 	// detected a mismatch: the local DB is missing but S3 has existing backup data.
 	// The pod is blocked from starting until a SQLiteRestore resolves the state.
 	ConditionArchiveCheckFailed = "ArchiveCheckFailed"
+
+	// ConditionReplicaCountExceeded indicates that the target workload has more
+	// than one replica. Litestream requires exactly one writer to avoid database
+	// corruption from concurrent writes.
+	ConditionReplicaCountExceeded = "ReplicaCountExceeded"
 
 	// ConditionReady is the top-level readiness condition.
 	ConditionReady = "Ready"

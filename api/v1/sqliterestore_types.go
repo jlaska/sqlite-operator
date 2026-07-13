@@ -26,7 +26,8 @@ const (
 	RestorePhasePausing     = "Pausing"     // pause annotation set, waiting for ConfigMap propagation
 	RestorePhaseScalingDown = "ScalingDown" // Deployment scaled to 0, waiting for pods to terminate
 	RestorePhaseRunning     = "Running"
-	RestorePhaseScalingUp   = "ScalingUp" // restore done, scaling Deployment back up
+	RestorePhaseValidating  = "Validating" // restore Job done; running PRAGMA quick_check integrity check
+	RestorePhaseScalingUp   = "ScalingUp"  // restore validated, scaling Deployment back up
 	RestorePhaseComplete    = "Complete"
 	RestorePhaseFailed      = "Failed"
 )
