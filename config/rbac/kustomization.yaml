@@ -20,9 +20,9 @@ resources:
 - metrics_reader_role.yaml
 # For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
 # default, aiding admins in cluster management. Those roles are
-# not used by the sqlite-operator itself. You can comment the following lines
+# not used by the litestream-operator itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- sqlitedb_admin_role.yaml
-- sqlitedb_editor_role.yaml
-- sqlitedb_viewer_role.yaml
+- litestreamreplica_admin_role.yaml
+- litestreamreplica_editor_role.yaml
+- litestreamreplica_viewer_role.yaml
 

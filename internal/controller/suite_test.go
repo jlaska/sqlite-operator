@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -86,7 +86,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
-	By("starting controller manager with SQLiteDBReconciler")
+	By("starting controller manager with LitestreamReplicaReconciler")
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:         scheme.Scheme,
 		Metrics:        metricsserver.Options{BindAddress: "0"},
@@ -94,10 +94,10 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	Expect((&SQLiteDBReconciler{
+	Expect((&LitestreamReplicaReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("sqlitedb-controller"),
+		Recorder: mgr.GetEventRecorderFor("litestreamreplica-controller"),
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {

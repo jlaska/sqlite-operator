@@ -1,17 +1,17 @@
-# Version management for SQLite Operator
+# Version management for Litestream Operator
 # This file defines version variables used across the project
 
 # Semantic version (update this for releases)
-VERSION ?= v0.3.3
+VERSION ?= v0.4.0
 
 # Container image settings
 REGISTRY ?= ghcr.io
 ORG ?= jlaska
-IMAGE_NAME ?= sqlite-operator
+IMAGE_NAME ?= litestream-operator
 IMG ?= $(REGISTRY)/$(ORG)/$(IMAGE_NAME):$(VERSION)
 
 # Kubernetes settings  
-NAMESPACE ?= sqlite-operator-system
+NAMESPACE ?= litestream-operator-system
 KUBECONFIG ?= ~/.kube/config
 
 # Build settings

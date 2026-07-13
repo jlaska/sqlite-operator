@@ -47,7 +47,7 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	cp config/crd/bases/*.yaml charts/sqlite-operator/crds/
+	cp config/crd/bases/*.yaml charts/litestream-operator/crds/
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -70,7 +70,7 @@ test: manifests generate setup-envtest ## Run tests. (go test runs go vet intern
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= sqlite-operator-test-e2e
+KIND_CLUSTER ?= litestream-operator-test-e2e
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -97,8 +97,8 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 #   make test-integration-teardown        — destroy cluster
 #
 # Variables:
-#   INTEGRATION_KIND_CLUSTER   cluster name (default: sqlite-operator-integration)
-#   INTEGRATION_KUBECONFIG     kubeconfig written by setup (default: /tmp/sqlite-integration-kubeconfig)
+#   INTEGRATION_KIND_CLUSTER   cluster name (default: litestream-operator-integration)
+#   INTEGRATION_KUBECONFIG     kubeconfig written by setup (default: /tmp/litestream-integration-kubeconfig)
 #   INTEGRATION_SKIP_CLUSTER_CREATE=true  skip 'kind create' (use existing cluster)
 #   INTEGRATION_KEEP_NAMESPACE=true       leave test namespace after run (for debugging)
 #
@@ -106,11 +106,11 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 #   When CONTAINER_TOOL=podman (or podman is the only available runtime),
 #   the setup target sets KIND_EXPERIMENTAL_PROVIDER=podman automatically.
 
-INTEGRATION_KIND_CLUSTER     ?= sqlite-operator-integration
-INTEGRATION_KUBECONFIG       ?= /tmp/sqlite-integration-kubeconfig
+INTEGRATION_KIND_CLUSTER     ?= litestream-operator-integration
+INTEGRATION_KUBECONFIG       ?= /tmp/litestream-integration-kubeconfig
 INTEGRATION_SKIP_CLUSTER_CREATE ?= false
 CERT_MANAGER_VERSION         ?= v1.16.3
-OPERATOR_NAMESPACE           ?= sqlite-operator-system
+OPERATOR_NAMESPACE           ?= litestream-operator-system
 
 # Detect whether to use the Podman provider for Kind.
 # Covers: explicit CONTAINER_TOOL=podman, and the common macOS case where the
@@ -165,8 +165,8 @@ test-integration-setup: docker-build ## Create Kind cluster (with Podman support
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl -n cert-manager wait \
 		--for=condition=Available deployment/cert-manager-webhook --timeout=5m
 
-	@echo "==> Deploying sqlite-operator via Helm (pullPolicy=Never — uses loaded image)"
-	KUBECONFIG=$(INTEGRATION_KUBECONFIG) helm upgrade --install sqlite-operator charts/sqlite-operator \
+	@echo "==> Deploying litestream-operator via Helm (pullPolicy=Never — uses loaded image)"
+	KUBECONFIG=$(INTEGRATION_KUBECONFIG) helm upgrade --install litestream-operator charts/litestream-operator \
 		--namespace $(OPERATOR_NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(ORG)/$(IMAGE_NAME) \
 		--set image.tag=$(VERSION) \
@@ -198,9 +198,9 @@ test-integration-redeploy: docker-build ## Rebuild image, reload into existing c
 	done
 	@echo "==> Restarting operator"
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl rollout restart \
-		deployment/sqlite-operator -n $(OPERATOR_NAMESPACE)
+		deployment/litestream-operator -n $(OPERATOR_NAMESPACE)
 	KUBECONFIG=$(INTEGRATION_KUBECONFIG) kubectl rollout status \
-		deployment/sqlite-operator -n $(OPERATOR_NAMESPACE) --timeout=2m
+		deployment/litestream-operator -n $(OPERATOR_NAMESPACE) --timeout=2m
 	$(MAKE) test-integration
 
 .PHONY: test-integration-teardown
@@ -278,10 +278,10 @@ PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name sqlite-operator-builder
-	$(CONTAINER_TOOL) buildx use sqlite-operator-builder
+	- $(CONTAINER_TOOL) buildx create --name litestream-operator-builder
+	$(CONTAINER_TOOL) buildx use litestream-operator-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm sqlite-operator-builder
+	- $(CONTAINER_TOOL) buildx rm litestream-operator-builder
 	rm Dockerfile.cross
 
 .PHONY: build-installer
@@ -298,28 +298,28 @@ ci-build: manifests generate fmt vet test docker-build ## Full CI build pipeline
 .PHONY: ci-deploy-manifests
 ci-deploy-manifests: manifests ## Generate release artifacts (Helm chart replaces kustomize deploy/)
 	mkdir -p release
-	cp deploy/samples/sample-sqlitedb.yaml release/samples.yaml
+	cp deploy/samples/sample-litestreamreplica.yaml release/samples.yaml
 
 .PHONY: helm-lint
 helm-lint: ## Lint the Helm chart
-	helm lint charts/sqlite-operator
+	helm lint charts/litestream-operator
 
 .PHONY: helm-package
 helm-package: ## Package the Helm chart into release/
 	mkdir -p release
-	helm package charts/sqlite-operator \
+	helm package charts/litestream-operator \
 		--version $(VERSION:v%=%) \
 		--app-version $(VERSION:v%=%) \
 		--destination release/
 
 .PHONY: helm-push
 helm-push: ## Push the Helm chart OCI artifact to the registry (requires helm registry login)
-	helm push release/sqlite-operator-$(VERSION:v%=%).tgz oci://$(REGISTRY)/$(ORG)/charts
-	@echo "Chart available at: oci://$(REGISTRY)/$(ORG)/charts/sqlite-operator"
+	helm push release/litestream-operator-$(VERSION:v%=%).tgz oci://$(REGISTRY)/$(ORG)/charts
+	@echo "Chart available at: oci://$(REGISTRY)/$(ORG)/charts/litestream-operator"
 
 .PHONY: helm-template
 helm-template: ## Render the Helm chart with default values (dry-run)
-	helm template sqlite-operator charts/sqlite-operator \
+	helm template litestream-operator charts/litestream-operator \
 		--namespace $(OPERATOR_NAMESPACE) \
 		--set image.tag=$(VERSION)
 
@@ -333,18 +333,18 @@ release-prepare: version ci-deploy-manifests helm-package ## Prepare files for r
 CHART_VER := $(VERSION:v%=%)
 
 .PHONY: chart-version-sync
-chart-version-sync: ## Sync charts/sqlite-operator/Chart.yaml version and appVersion from Makefile.versions
+chart-version-sync: ## Sync charts/litestream-operator/Chart.yaml version and appVersion from Makefile.versions
 	@echo "Syncing Chart.yaml to version $(CHART_VER)"
 	@sed -i.bak \
 		-e 's/^version:.*/version: $(CHART_VER)/' \
 		-e 's/^appVersion:.*/appVersion: "$(CHART_VER)"/' \
-		charts/sqlite-operator/Chart.yaml
-	@rm -f charts/sqlite-operator/Chart.yaml.bak
+		charts/litestream-operator/Chart.yaml
+	@rm -f charts/litestream-operator/Chart.yaml.bak
 
 .PHONY: tag
 tag: chart-version-sync ## Commit version bump + Chart.yaml, create and push git tag (run after version-bump-*)
 	@echo "Tagging release $(VERSION)"
-	git add Makefile.versions charts/sqlite-operator/Chart.yaml
+	git add Makefile.versions charts/litestream-operator/Chart.yaml
 	git commit -m "chore: release $(VERSION)"
 	git tag $(VERSION) -m "Release $(VERSION)"
 	git push origin HEAD
@@ -358,7 +358,7 @@ docker-build-multiarch: ## Build multi-architecture Docker image
 
 .PHONY: update-deploy-image
 update-deploy-image: ## Update image tag in Helm chart values
-	sed -i.bak 's|^  tag:.*|  tag: "$(VERSION)"|' charts/sqlite-operator/values.yaml && rm -f charts/sqlite-operator/values.yaml.bak
+	sed -i.bak 's|^  tag:.*|  tag: "$(VERSION)"|' charts/litestream-operator/values.yaml && rm -f charts/litestream-operator/values.yaml.bak
 
 ##@ Deployment
 

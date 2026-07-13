@@ -1,0 +1,19 @@
+apiVersion: v2
+name: litestream-operator
+description: A Kubernetes operator for managing SQLite databases managed by Litestream with Litestream backup
+type: application
+version: 0.4.0
+appVersion: "0.4.0"
+keywords:
+  - sqlite
+  - litestream
+  - database
+  - operator
+  - litestream
+  - backup
+home: https://github.com/jlaska/litestream-operator
+sources:
+  - https://github.com/jlaska/litestream-operator
+maintainers:
+  - name: jlaska
+    url: https://github.com/jlaska

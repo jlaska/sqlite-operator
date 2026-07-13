@@ -2,18 +2,18 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  name: sqlite-operator-mutating-webhook
+  name: litestream-operator-mutating-webhook
   annotations:
     # cert-manager injects the CA bundle into this annotation when the
     # Certificate is ready. Remove this annotation if not using cert-manager.
-    cert-manager.io/inject-ca-from: sqlite-operator-system/sqlite-operator-serving-cert
+    cert-manager.io/inject-ca-from: litestream-operator-system/litestream-operator-serving-cert
 webhooks:
-  - name: pod.sqlite.database.example.com
+  - name: pod.litestream.io
     admissionReviewVersions: ["v1"]
     clientConfig:
       service:
-        name: sqlite-operator-webhook-service
-        namespace: sqlite-operator-system
+        name: litestream-operator-webhook-service
+        namespace: litestream-operator-system
         path: /mutate-core-v1-pod
     rules:
       - apiGroups: [""]
@@ -25,7 +25,7 @@ webhooks:
     objectSelector:
       matchLabels: {}
       matchExpressions:
-        - key: sqlite.database.example.com/inject
+        - key: litestream.io/inject
           operator: In
           values: ["true"]
     failurePolicy: Fail
@@ -35,22 +35,22 @@ webhooks:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  name: sqlite-operator-validating-webhook
+  name: litestream-operator-validating-webhook
   annotations:
-    cert-manager.io/inject-ca-from: sqlite-operator-system/sqlite-operator-serving-cert
+    cert-manager.io/inject-ca-from: litestream-operator-system/litestream-operator-serving-cert
 webhooks:
-  - name: vsqlitedb.kb.io
+  - name: vlitestreamreplica.kb.io
     admissionReviewVersions: ["v1"]
     clientConfig:
       service:
-        name: sqlite-operator-webhook-service
-        namespace: sqlite-operator-system
-        path: /validate-database-example-com-v1-sqlitedb
+        name: litestream-operator-webhook-service
+        namespace: litestream-operator-system
+        path: /validate-database-example-com-v1-litestreamreplica
     rules:
-      - apiGroups: ["database.example.com"]
+      - apiGroups: ["litestream.io"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["sqlitedbs"]
+        resources: ["litestreamreplicas"]
         scope: "Namespaced"
     failurePolicy: Fail
     sideEffects: None

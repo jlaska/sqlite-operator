@@ -1,4 +1,4 @@
 ## Append samples of your project ##
 resources:
-- database_v1_sqlitedb.yaml
+- litestream_io_v1_litestreamreplica.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

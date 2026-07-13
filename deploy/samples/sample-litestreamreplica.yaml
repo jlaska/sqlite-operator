@@ -1,0 +1,61 @@
+---
+# Example 1: Target a StatefulSet (recommended for new deployments)
+# StatefulSets are the upstream-recommended workload type for Litestream because
+# they provide stable network identity and predictable pod names.
+apiVersion: litestream.io/v1
+kind: SQLiteDB
+metadata:
+  name: example-litestream-sts
+  namespace: default
+spec:
+  databaseName: myapp.db
+  databasePath: /data
+  targetStatefulSet: myapp       # name of the existing StatefulSet to inject into
+  image: litestream/litestream:0.5.14
+  backup:
+    enabled: true
+    destination:
+      s3:
+        endpoint: minio.homelab:9000   # remove for AWS S3
+        bucket: litestream-backups
+        path: myapp/
+        secretRef: myapp-s3-creds      # Secret with ACCESS_KEY_ID / SECRET_ACCESS_KEY
+    retention:
+      duration: "720h"                 # 30 days
+  initSQL: |
+    CREATE TABLE IF NOT EXISTS users (
+      id    INTEGER PRIMARY KEY AUTOINCREMENT,
+      name  TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE
+    );
+---
+# Example 2: Target a Deployment (alternative; must have replicas: 1)
+apiVersion: litestream.io/v1
+kind: SQLiteDB
+metadata:
+  name: example-litestream-dep
+  namespace: default
+spec:
+  databaseName: myapp.db
+  databasePath: /data
+  targetDeployment: myapp        # name of the existing Deployment to inject into
+  image: litestream/litestream:0.5.14
+  backup:
+    enabled: true
+    destination:
+      s3:
+        endpoint: minio.homelab:9000   # remove for AWS S3
+        bucket: litestream-backups
+        path: myapp-dep/
+        secretRef: myapp-s3-creds
+    retention:
+      duration: "720h"
+  # Optional: seed the database schema on first use.
+  # Applied exactly once per unique content hash; safe to update as you add tables.
+  initSQL: |
+    CREATE TABLE IF NOT EXISTS users (
+      id    INTEGER PRIMARY KEY AUTOINCREMENT,
+      name  TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE
+    );
+  # initImage: keinos/sqlite3:latest  # override if needed

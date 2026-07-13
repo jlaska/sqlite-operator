@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
 )
 
 // workloadTarget holds the resolved target workload (Deployment or StatefulSet)
@@ -108,32 +108,32 @@ func (wt *workloadTarget) readyReplicas() int32 {
 	return wt.statefulSet.Status.ReadyReplicas
 }
 
-// getTargetWorkload resolves the SQLiteDB's target workload (Deployment or StatefulSet).
+// getTargetWorkload resolves the LitestreamReplica's target workload (Deployment or StatefulSet).
 // Returns an error wrapping a not-found error when the workload does not exist.
-func (r *SQLiteDBReconciler) getTargetWorkload(ctx context.Context, sqliteDB *databasev1.SQLiteDB) (*workloadTarget, error) {
-	if sqliteDB.Spec.TargetStatefulSet != "" {
+func (r *LitestreamReplicaReconciler) getTargetWorkload(ctx context.Context, db *databasev1.LitestreamReplica) (*workloadTarget, error) {
+	if db.Spec.TargetStatefulSet != "" {
 		ss := &appsv1.StatefulSet{}
 		if err := r.Get(ctx, types.NamespacedName{
-			Namespace: sqliteDB.Namespace,
-			Name:      sqliteDB.Spec.TargetStatefulSet,
+			Namespace: db.Namespace,
+			Name:      db.Spec.TargetStatefulSet,
 		}, ss); err != nil {
-			return nil, fmt.Errorf("target StatefulSet %q: %w", sqliteDB.Spec.TargetStatefulSet, err)
+			return nil, fmt.Errorf("target StatefulSet %q: %w", db.Spec.TargetStatefulSet, err)
 		}
 		return &workloadTarget{statefulSet: ss}, nil
 	}
 	dep := &appsv1.Deployment{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: sqliteDB.Namespace,
-		Name:      sqliteDB.Spec.TargetDeployment,
+		Namespace: db.Namespace,
+		Name:      db.Spec.TargetDeployment,
 	}, dep); err != nil {
-		return nil, fmt.Errorf("target Deployment %q: %w", sqliteDB.Spec.TargetDeployment, err)
+		return nil, fmt.Errorf("target Deployment %q: %w", db.Spec.TargetDeployment, err)
 	}
 	return &workloadTarget{deployment: dep}, nil
 }
 
 // patchWorkloadPodTemplate merges addAnnotations and addLabels into the pod template
 // of the target workload using a MergePatch.
-func (r *SQLiteDBReconciler) patchWorkloadPodTemplate(ctx context.Context, wt *workloadTarget, addAnnotations, addLabels map[string]string) error {
+func (r *LitestreamReplicaReconciler) patchWorkloadPodTemplate(ctx context.Context, wt *workloadTarget, addAnnotations, addLabels map[string]string) error {
 	if wt.deployment != nil {
 		dep := wt.deployment
 		patch := client.MergeFrom(dep.DeepCopy())
@@ -168,10 +168,10 @@ func (r *SQLiteDBReconciler) patchWorkloadPodTemplate(ctx context.Context, wt *w
 	return r.Patch(ctx, ss, patch)
 }
 
-// getTargetWorkloadForRestore resolves the SQLiteDB's target workload for use by
+// getTargetWorkloadForRestore resolves the LitestreamReplica's target workload for use by
 // the restore controller. The two reconcilers intentionally keep separate helper
 // methods so each can evolve its error-handling independently.
-func (r *SQLiteRestoreReconciler) getTargetWorkloadForRestore(ctx context.Context, db *databasev1.SQLiteDB) (*workloadTarget, error) {
+func (r *LitestreamRestoreReconciler) getTargetWorkloadForRestore(ctx context.Context, db *databasev1.LitestreamReplica) (*workloadTarget, error) {
 	if db.Spec.TargetStatefulSet != "" {
 		ss := &appsv1.StatefulSet{}
 		if err := r.Get(ctx, types.NamespacedName{
@@ -193,7 +193,7 @@ func (r *SQLiteRestoreReconciler) getTargetWorkloadForRestore(ctx context.Contex
 }
 
 // scaleWorkload patches the replica count of the target workload.
-func (r *SQLiteRestoreReconciler) scaleWorkload(ctx context.Context, wt *workloadTarget, replicas int32) error {
+func (r *LitestreamRestoreReconciler) scaleWorkload(ctx context.Context, wt *workloadTarget, replicas int32) error {
 	if wt.deployment != nil {
 		dep := wt.deployment
 		if dep.Spec.Replicas != nil && *dep.Spec.Replicas == replicas {

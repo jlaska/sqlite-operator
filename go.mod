@@ -1,4 +1,4 @@
-module github.com/jlaska/sqlite-operator
+module github.com/jlaska/litestream-operator
 
 go 1.26.0
 

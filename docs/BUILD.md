@@ -1,12 +1,12 @@
 # Build and CI/CD Setup Guide
 
-This guide covers setting up the build pipeline and CI/CD for the SQLite Operator with Quay.io integration.
+This guide covers setting up the build pipeline and CI/CD for the Litestream Operator with Quay.io integration.
 
 ## Prerequisites
 
 1. **Quay.io Account**: Create an account at [quay.io](https://quay.io)
 2. **GitHub Repository**: Push your code to GitHub
-3. **Container Registry**: Create a repository at `quay.io/jlaska/sqlite-operator`
+3. **Container Registry**: Create a repository at `quay.io/jlaska/litestream-operator`
 
 ## Quay.io Setup
 
@@ -14,7 +14,7 @@ This guide covers setting up the build pipeline and CI/CD for the SQLite Operato
 
 1. Go to [quay.io](https://quay.io)
 2. Click "Create New Repository"
-3. Name: `sqlite-operator`
+3. Name: `litestream-operator`
 4. Visibility: Public (or Private if preferred)
 5. Click "Create Public Repository"
 
@@ -63,13 +63,13 @@ Ensure these settings are enabled:
 make ci-build
 
 # Build for specific version
-make docker-build IMG=quay.io/jlaska/sqlite-operator:v0.1.0
+make docker-build IMG=quay.io/jlaska/litestream-operator:v0.1.0
 
 # Push to registry
-make docker-push IMG=quay.io/jlaska/sqlite-operator:v0.1.0
+make docker-push IMG=quay.io/jlaska/litestream-operator:v0.1.0
 
 # Generate release manifests
-make ci-deploy-manifests IMG=quay.io/jlaska/sqlite-operator:v0.1.0
+make ci-deploy-manifests IMG=quay.io/jlaska/litestream-operator:v0.1.0
 ```
 
 ### Version Management
@@ -92,7 +92,7 @@ make docker-push
 
 ```bash
 # Build for multiple architectures
-make docker-build-multiarch IMG=quay.io/jlaska/sqlite-operator:v0.1.0
+make docker-build-multiarch IMG=quay.io/jlaska/litestream-operator:v0.1.0
 ```
 
 ## CI/CD Pipeline Workflow
@@ -135,18 +135,18 @@ This will trigger the full pipeline and create a GitHub release.
 
 ```bash
 # Deploy operator
-kubectl apply -f https://github.com/jlaska/sqlite-operator/releases/latest/download/sqlite-operator.yaml
+kubectl apply -f https://github.com/jlaska/litestream-operator/releases/latest/download/litestream-operator.yaml
 
 # Deploy samples
-kubectl apply -f https://github.com/jlaska/sqlite-operator/releases/latest/download/samples.yaml
+kubectl apply -f https://github.com/jlaska/litestream-operator/releases/latest/download/samples.yaml
 ```
 
 ### Option 2: Kustomize
 
 ```bash
 # Clone and deploy
-git clone https://github.com/jlaska/sqlite-operator.git
-cd sqlite-operator
+git clone https://github.com/jlaska/litestream-operator.git
+cd litestream-operator
 kubectl apply -k deploy/
 kubectl apply -k deploy/samples/
 ```
@@ -159,17 +159,17 @@ Create an ArgoCD Application:
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: sqlite-operator
+  name: litestream-operator
   namespace: argocd
 spec:
   project: default
   source:
-    repoURL: https://github.com/jlaska/sqlite-operator.git
+    repoURL: https://github.com/jlaska/litestream-operator.git
     targetRevision: HEAD
     path: deploy
   destination:
     server: https://kubernetes.default.svc
-    namespace: sqlite-operator-system
+    namespace: litestream-operator-system
   syncPolicy:
     automated: {}
     syncOptions:
@@ -179,14 +179,14 @@ spec:
 ## Monitoring Build Status
 
 ### GitHub Actions
-- View workflow runs at: `https://github.com/jlaska/sqlite-operator/actions`
+- View workflow runs at: `https://github.com/jlaska/litestream-operator/actions`
 
 ### Quay.io
-- View builds at: `https://quay.io/repository/jlaska/sqlite-operator`
+- View builds at: `https://quay.io/repository/jlaska/litestream-operator`
 - Check tags and security scans
 
 ### Releases
-- View releases at: `https://github.com/jlaska/sqlite-operator/releases`
+- View releases at: `https://github.com/jlaska/litestream-operator/releases`
 
 ## Troubleshooting
 
@@ -207,7 +207,7 @@ make ci-build
 
 ```bash
 # Verify image exists
-docker pull quay.io/jlaska/sqlite-operator:latest
+docker pull quay.io/jlaska/litestream-operator:latest
 
 # Check repository visibility
 # Ensure Quay repository is public or credentials are configured
@@ -217,10 +217,10 @@ docker pull quay.io/jlaska/sqlite-operator:latest
 
 ```bash
 # Check operator logs
-kubectl logs -n sqlite-operator-system deployment/sqlite-operator-controller-manager
+kubectl logs -n litestream-operator-system deployment/litestream-operator-controller-manager
 
 # Verify image reference in deployment
-kubectl get deployment -n sqlite-operator-system -o yaml | grep image
+kubectl get deployment -n litestream-operator-system -o yaml | grep image
 ```
 
 ## Security Best Practices

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package main is the entrypoint for the SQLite operator controller manager.
+// Package main is the entrypoint for the Litestream operator controller manager.
 package main
 
 import (
@@ -39,9 +39,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
-	"github.com/jlaska/sqlite-operator/internal/controller"
-	sqlitewebhook "github.com/jlaska/sqlite-operator/internal/webhook"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
+	"github.com/jlaska/litestream-operator/internal/controller"
+	litestreamwebhook "github.com/jlaska/litestream-operator/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -194,7 +194,7 @@ func main() {
 		WebhookServer:          webhookServer, // only used when webhooksEnabled
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "dc63c944.example.com",
+		LeaderElectionID:       "dc63c944.litestream.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -212,32 +212,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.SQLiteDBReconciler{
+	if err := (&controller.LitestreamReplicaReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("sqlitedb-controller"), //nolint:staticcheck
+		Recorder: mgr.GetEventRecorderFor("litestreamreplica-controller"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "SQLiteDB")
+		setupLog.Error(err, "unable to create controller", "controller", "LitestreamReplica")
 		os.Exit(1)
 	}
 
-	if err := (&controller.SQLiteRestoreReconciler{
+	if err := (&controller.LitestreamRestoreReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("sqliterestore-controller"), //nolint:staticcheck
+		Recorder: mgr.GetEventRecorderFor("litestreamrestore-controller"), //nolint:staticcheck
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "SQLiteRestore")
+		setupLog.Error(err, "unable to create controller", "controller", "LitestreamRestore")
 		os.Exit(1)
 	}
 
 	if webhooksEnabled {
-		if err := (&sqlitewebhook.SQLiteDBValidator{}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "SQLiteDB")
+		if err := (&litestreamwebhook.LitestreamReplicaValidator{}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "LitestreamReplica")
 			os.Exit(1)
 		}
 
 		mgr.GetWebhookServer().Register("/mutate-core-v1-pod", &webhook.Admission{
-			Handler: &sqlitewebhook.SidecarInjector{
+			Handler: &litestreamwebhook.SidecarInjector{
 				Client:  mgr.GetClient(),
 				Decoder: admission.NewDecoder(mgr.GetScheme()),
 			},

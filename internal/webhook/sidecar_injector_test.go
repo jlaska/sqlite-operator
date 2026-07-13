@@ -26,40 +26,40 @@ import (
 	jsonpatch "gomodules.xyz/jsonpatch/v2"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
-	"github.com/jlaska/sqlite-operator/internal/webhook"
+	databasev1 "github.com/jlaska/litestream-operator/api/v1"
+	"github.com/jlaska/litestream-operator/internal/webhook"
 )
 
 var _ = Describe("SidecarInjector", func() {
 	const (
-		namespace         = "default"
-		sqliteDBName      = "test-db"
-		deploymentName    = "test-app"
-		databaseName      = "myapp.db"
-		databasePath      = "/data"
-		volumeName        = "app-data"
-		appContainerName  = "app"        // goconst
-		appContainerImage = "busybox"    // goconst
-		litestreamName    = "litestream" // goconst
-		injectTrue        = "true"       // goconst
+		namespace             = "default"
+		litestreamReplicaName = "test-db"
+		deploymentName        = "test-app"
+		databaseName          = "myapp.db"
+		databasePath          = "/data"
+		volumeName            = "app-data"
+		appContainerName      = "app"        // goconst
+		appContainerImage     = "busybox"    // goconst
+		litestreamName        = "litestream" // goconst
+		injectTrue            = "true"       // goconst
 	)
 
 	ctx := context.Background()
 
-	// Helper: build a SQLiteDB CR.
-	newSQLiteDB := func(backupEnabled bool) *databasev1.SQLiteDB {
-		db := &databasev1.SQLiteDB{
+	// Helper: build a LitestreamReplica CR.
+	newLitestreamReplica := func(backupEnabled bool) *databasev1.LitestreamReplica {
+		db := &databasev1.LitestreamReplica{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      sqliteDBName,
+				Name:      litestreamReplicaName,
 				Namespace: namespace,
 			},
-			Spec: databasev1.SQLiteDBSpec{
+			Spec: databasev1.LitestreamReplicaSpec{
 				DatabaseName:     databaseName,
 				DatabasePath:     databasePath,
 				TargetDeployment: deploymentName,
@@ -130,13 +130,13 @@ var _ = Describe("SidecarInjector", func() {
 	}
 
 	BeforeEach(func() {
-		db := newSQLiteDB(false)
+		db := newLitestreamReplica(false)
 		Expect(k8sClient.Create(ctx, db)).To(Succeed())
 	})
 
 	AfterEach(func() {
-		db := &databasev1.SQLiteDB{}
-		err := k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db)
+		db := &databasev1.LitestreamReplica{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: litestreamReplicaName, Namespace: namespace}, db)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
 	})
@@ -159,7 +159,7 @@ var _ = Describe("SidecarInjector", func() {
 				Name: "no-config-pod", Namespace: namespace,
 				Annotations: map[string]string{
 					databasev1.AnnotationInject: injectTrue,
-					// No AnnotationConfig — resolveSQLiteDB returns nil.
+					// No AnnotationConfig — resolveLitestreamReplica returns nil.
 				},
 			},
 			Spec: corev1.PodSpec{
@@ -172,7 +172,7 @@ var _ = Describe("SidecarInjector", func() {
 	})
 
 	It("injects the Litestream sidecar into annotated pods", func() {
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		resp := newInjector().Handle(ctx, makeRequest(pod))
 		Expect(resp.Allowed).To(BeTrue())
 
@@ -201,7 +201,7 @@ var _ = Describe("SidecarInjector", func() {
 	})
 
 	It("is idempotent — does not inject twice", func() {
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		injector := newInjector()
 
 		first := injector.Handle(ctx, makeRequest(pod))
@@ -218,13 +218,13 @@ var _ = Describe("SidecarInjector", func() {
 
 	It("injects S3 credential env vars when backup is enabled", func() {
 		// Replace the CR with one that has backup enabled.
-		db := &databasev1.SQLiteDB{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db)).To(Succeed())
+		db := &databasev1.LitestreamReplica{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: litestreamReplicaName, Namespace: namespace}, db)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
 
-		Expect(k8sClient.Create(ctx, newSQLiteDB(true))).To(Succeed())
+		Expect(k8sClient.Create(ctx, newLitestreamReplica(true))).To(Succeed())
 
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		resp := newInjector().Handle(ctx, makeRequest(pod))
 		Expect(resp.Allowed).To(BeTrue())
 
@@ -244,7 +244,7 @@ var _ = Describe("SidecarInjector", func() {
 	})
 
 	It("injects metrics port 9090 on the sidecar container", func() {
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		resp := newInjector().Handle(ctx, makeRequest(pod))
 		Expect(resp.Allowed).To(BeTrue())
 
@@ -262,7 +262,7 @@ var _ = Describe("SidecarInjector", func() {
 	})
 
 	It("adds Prometheus scrape annotations to the pod", func() {
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		resp := newInjector().Handle(ctx, makeRequest(pod))
 		Expect(resp.Allowed).To(BeTrue())
 
@@ -273,7 +273,7 @@ var _ = Describe("SidecarInjector", func() {
 	})
 
 	It("injects default ephemeral-storage limit on sidecar when no resources specified", func() {
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		resp := newInjector().Handle(ctx, makeRequest(pod))
 		Expect(resp.Allowed).To(BeTrue())
 
@@ -289,15 +289,15 @@ var _ = Describe("SidecarInjector", func() {
 	})
 
 	It("injects LITESTREAM_LOG_LEVEL env var when logLevel is set", func() {
-		db := &databasev1.SQLiteDB{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db)).To(Succeed())
+		db := &databasev1.LitestreamReplica{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: litestreamReplicaName, Namespace: namespace}, db)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
 
-		dbWithLogLevel := newSQLiteDB(false)
+		dbWithLogLevel := newLitestreamReplica(false)
 		dbWithLogLevel.Spec.Backup.LogLevel = "debug"
 		Expect(k8sClient.Create(ctx, dbWithLogLevel)).To(Succeed())
 
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		resp := newInjector().Handle(ctx, makeRequest(pod))
 		Expect(resp.Allowed).To(BeTrue())
 
@@ -320,11 +320,11 @@ var _ = Describe("SidecarInjector", func() {
 	})
 
 	It("uses custom resource requirements when spec.backup.resources is set", func() {
-		db := &databasev1.SQLiteDB{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db)).To(Succeed())
+		db := &databasev1.LitestreamReplica{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: litestreamReplicaName, Namespace: namespace}, db)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, db)).To(Succeed())
 
-		dbWithResources := newSQLiteDB(false)
+		dbWithResources := newLitestreamReplica(false)
 		cpuLimit := "50m"
 		dbWithResources.Spec.Backup.Resources = &corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
@@ -333,7 +333,7 @@ var _ = Describe("SidecarInjector", func() {
 		}
 		Expect(k8sClient.Create(ctx, dbWithResources)).To(Succeed())
 
-		pod := newAnnotatedPod(namespace + "/" + sqliteDBName)
+		pod := newAnnotatedPod(namespace + "/" + litestreamReplicaName)
 		resp := newInjector().Handle(ctx, makeRequest(pod))
 		Expect(resp.Allowed).To(BeTrue())
 
@@ -353,16 +353,16 @@ var _ = Describe("SidecarInjector", func() {
 
 var _ = Describe("SidecarInjector init container", func() {
 	const (
-		namespace         = "default"
-		sqliteDBName      = "init-test-db"
-		deployName        = "init-test-app"
-		databaseName      = "app.db"
-		databasePath      = "/data"
-		volumeName        = "app-data"
-		initSQL           = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
-		injectTrue        = "true"    // goconst: mirrors constant in first Describe
-		appContainerName  = "app"     // goconst: mirrors constant in first Describe
-		appContainerImage = "busybox" // goconst: mirrors constant in first Describe
+		namespace             = "default"
+		litestreamReplicaName = "init-test-db"
+		deployName            = "init-test-app"
+		databaseName          = "app.db"
+		databasePath          = "/data"
+		volumeName            = "app-data"
+		initSQL               = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);"
+		injectTrue            = "true"    // goconst: mirrors constant in first Describe
+		appContainerName      = "app"     // goconst: mirrors constant in first Describe
+		appContainerImage     = "busybox" // goconst: mirrors constant in first Describe
 	)
 
 	ctx := context.Background()
@@ -406,11 +406,11 @@ var _ = Describe("SidecarInjector init container", func() {
 	}
 
 	BeforeEach(func() {
-		db := &databasev1.SQLiteDB{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db); err != nil {
-			db = &databasev1.SQLiteDB{
-				ObjectMeta: metav1.ObjectMeta{Name: sqliteDBName, Namespace: namespace},
-				Spec: databasev1.SQLiteDBSpec{
+		db := &databasev1.LitestreamReplica{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: litestreamReplicaName, Namespace: namespace}, db); err != nil {
+			db = &databasev1.LitestreamReplica{
+				ObjectMeta: metav1.ObjectMeta{Name: litestreamReplicaName, Namespace: namespace},
+				Spec: databasev1.LitestreamReplicaSpec{
 					DatabaseName:     databaseName,
 					DatabasePath:     databasePath,
 					TargetDeployment: deployName,
@@ -422,8 +422,8 @@ var _ = Describe("SidecarInjector init container", func() {
 	})
 
 	AfterEach(func() {
-		db := &databasev1.SQLiteDB{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, db); err == nil {
+		db := &databasev1.LitestreamReplica{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: litestreamReplicaName, Namespace: namespace}, db); err == nil {
 			Expect(k8sClient.Delete(ctx, db)).To(Succeed())
 		}
 	})
@@ -431,7 +431,7 @@ var _ = Describe("SidecarInjector init container", func() {
 	It("injects an init container when InitSQL is set", func() {
 		annotations := map[string]string{
 			databasev1.AnnotationInject: injectTrue,
-			databasev1.AnnotationConfig: namespace + "/" + sqliteDBName,
+			databasev1.AnnotationConfig: namespace + "/" + litestreamReplicaName,
 		}
 		pod := newPod(annotations)
 		resp := newInjector().Handle(ctx, makePodRequest(pod))
@@ -442,13 +442,13 @@ var _ = Describe("SidecarInjector init container", func() {
 		for i, c := range patched.Spec.InitContainers {
 			initNames[i] = c.Name
 		}
-		Expect(initNames).To(ContainElement("sqlite-init"))
+		Expect(initNames).To(ContainElement("db-init"))
 	})
 
 	It("init container script references the correct database path", func() {
 		annotations := map[string]string{
 			databasev1.AnnotationInject: injectTrue,
-			databasev1.AnnotationConfig: namespace + "/" + sqliteDBName,
+			databasev1.AnnotationConfig: namespace + "/" + litestreamReplicaName,
 		}
 		pod := newPod(annotations)
 		resp := newInjector().Handle(ctx, makePodRequest(pod))
@@ -457,7 +457,7 @@ var _ = Describe("SidecarInjector init container", func() {
 		patched := applyInitPatches(pod, resp.Patches)
 		var initContainer corev1.Container
 		for _, c := range patched.Spec.InitContainers {
-			if c.Name == "sqlite-init" {
+			if c.Name == "db-init" {
 				initContainer = c
 				break
 			}
@@ -467,9 +467,9 @@ var _ = Describe("SidecarInjector init container", func() {
 
 	It("does not inject an init container when InitSQL is empty", func() {
 		// Create a second DB with no initSQL.
-		noInitDB := &databasev1.SQLiteDB{
+		noInitDB := &databasev1.LitestreamReplica{
 			ObjectMeta: metav1.ObjectMeta{Name: "no-init-db", Namespace: namespace},
-			Spec: databasev1.SQLiteDBSpec{
+			Spec: databasev1.LitestreamReplicaSpec{
 				DatabaseName:     databaseName,
 				DatabasePath:     databasePath,
 				TargetDeployment: deployName,
@@ -494,13 +494,13 @@ var _ = Describe("SidecarInjector init container", func() {
 		const customInitImage = "my-org/sqlite3-custom:v1.2"
 
 		// Replace the default DB with one that has a custom initImage.
-		existing := &databasev1.SQLiteDB{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sqliteDBName, Namespace: namespace}, existing)).To(Succeed())
+		existing := &databasev1.LitestreamReplica{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: litestreamReplicaName, Namespace: namespace}, existing)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, existing)).To(Succeed())
 
-		customDB := &databasev1.SQLiteDB{
-			ObjectMeta: metav1.ObjectMeta{Name: sqliteDBName, Namespace: namespace},
-			Spec: databasev1.SQLiteDBSpec{
+		customDB := &databasev1.LitestreamReplica{
+			ObjectMeta: metav1.ObjectMeta{Name: litestreamReplicaName, Namespace: namespace},
+			Spec: databasev1.LitestreamReplicaSpec{
 				DatabaseName:     databaseName,
 				DatabasePath:     databasePath,
 				TargetDeployment: deployName,
@@ -512,7 +512,7 @@ var _ = Describe("SidecarInjector init container", func() {
 
 		annotations := map[string]string{
 			databasev1.AnnotationInject: injectTrue,
-			databasev1.AnnotationConfig: namespace + "/" + sqliteDBName,
+			databasev1.AnnotationConfig: namespace + "/" + litestreamReplicaName,
 		}
 		pod := newPod(annotations)
 		resp := newInjector().Handle(ctx, makePodRequest(pod))
@@ -521,7 +521,7 @@ var _ = Describe("SidecarInjector init container", func() {
 		patched := applyInitPatches(pod, resp.Patches)
 		var initContainer corev1.Container
 		for _, c := range patched.Spec.InitContainers {
-			if c.Name == "sqlite-init" {
+			if c.Name == "db-init" {
 				initContainer = c
 				break
 			}
@@ -584,10 +584,10 @@ var _ = Describe("SidecarInjector archive check", func() {
 		}
 	}
 
-	newBackupDB := func(annotations map[string]string) *databasev1.SQLiteDB {
-		db := &databasev1.SQLiteDB{
+	newBackupDB := func(annotations map[string]string) *databasev1.LitestreamReplica {
+		db := &databasev1.LitestreamReplica{
 			ObjectMeta: metav1.ObjectMeta{Name: acDBName, Namespace: namespace, Annotations: annotations},
-			Spec: databasev1.SQLiteDBSpec{
+			Spec: databasev1.LitestreamReplicaSpec{
 				DatabaseName:     acDatabaseName,
 				DatabasePath:     acDatabasePath,
 				TargetDeployment: acDeployName,
@@ -603,7 +603,7 @@ var _ = Describe("SidecarInjector archive check", func() {
 	}
 
 	AfterEach(func() {
-		db := &databasev1.SQLiteDB{}
+		db := &databasev1.LitestreamReplica{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: acDBName, Namespace: namespace}, db); err == nil {
 			_ = k8sClient.Delete(ctx, db)
 		}
@@ -627,7 +627,7 @@ var _ = Describe("SidecarInjector archive check", func() {
 		Expect(initNames).To(ContainElement("litestream-archive-check"))
 	})
 
-	It("archive-check init container is first (before sqlite-init)", func() {
+	It("archive-check init container is first (before db-init)", func() {
 		db := newBackupDB(nil)
 		db.Spec.InitSQL = "CREATE TABLE t (id INTEGER PRIMARY KEY);"
 		Expect(k8sClient.Create(ctx, db)).To(Succeed())
@@ -642,7 +642,7 @@ var _ = Describe("SidecarInjector archive check", func() {
 		patched := applyAllPatches(newPod(annotations), resp.Patches)
 		Expect(patched.Spec.InitContainers).To(HaveLen(2))
 		Expect(patched.Spec.InitContainers[0].Name).To(Equal("litestream-archive-check"))
-		Expect(patched.Spec.InitContainers[1].Name).To(Equal("sqlite-init"))
+		Expect(patched.Spec.InitContainers[1].Name).To(Equal("db-init"))
 	})
 
 	It("archive-check init container has correct volume mounts", func() {
@@ -727,9 +727,9 @@ var _ = Describe("SidecarInjector archive check", func() {
 	})
 
 	It("does not inject archive-check when backup is disabled", func() {
-		db := &databasev1.SQLiteDB{
+		db := &databasev1.LitestreamReplica{
 			ObjectMeta: metav1.ObjectMeta{Name: acDBName, Namespace: namespace},
-			Spec: databasev1.SQLiteDBSpec{
+			Spec: databasev1.LitestreamReplicaSpec{
 				DatabaseName:     acDatabaseName,
 				DatabasePath:     acDatabasePath,
 				TargetDeployment: acDeployName,
@@ -751,7 +751,7 @@ var _ = Describe("SidecarInjector archive check", func() {
 		}
 	})
 
-	It("does not inject archive-check when skip-archive-check annotation is set on SQLiteDB", func() {
+	It("does not inject archive-check when skip-archive-check annotation is set on LitestreamReplica", func() {
 		annotations := map[string]string{
 			databasev1.AnnotationSkipArchiveCheck: "true",
 		}
@@ -874,10 +874,10 @@ var _ = Describe("SidecarInjector auto-restore", func() {
 		}
 	}
 
-	newAutoRestoreDB := func() *databasev1.SQLiteDB {
-		return &databasev1.SQLiteDB{
+	newAutoRestoreDB := func() *databasev1.LitestreamReplica {
+		return &databasev1.LitestreamReplica{
 			ObjectMeta: metav1.ObjectMeta{Name: arDBName, Namespace: namespace},
-			Spec: databasev1.SQLiteDBSpec{
+			Spec: databasev1.LitestreamReplicaSpec{
 				DatabaseName:     arDatabaseName,
 				DatabasePath:     arDatabasePath,
 				TargetDeployment: arDeployName,
@@ -900,7 +900,7 @@ var _ = Describe("SidecarInjector auto-restore", func() {
 	})
 
 	AfterEach(func() {
-		db := &databasev1.SQLiteDB{}
+		db := &databasev1.LitestreamReplica{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: arDBName, Namespace: namespace}, db); err == nil {
 			_ = k8sClient.Delete(ctx, db)
 		}
@@ -1019,9 +1019,9 @@ var _ = Describe("SidecarInjector error paths", func() {
 	}
 
 	BeforeEach(func() {
-		db := &databasev1.SQLiteDB{
+		db := &databasev1.LitestreamReplica{
 			ObjectMeta: metav1.ObjectMeta{Name: errDBName, Namespace: namespace},
-			Spec: databasev1.SQLiteDBSpec{
+			Spec: databasev1.LitestreamReplicaSpec{
 				DatabaseName:     "app.db",
 				DatabasePath:     errDatabasePath,
 				TargetDeployment: errDeployName,
@@ -1031,7 +1031,7 @@ var _ = Describe("SidecarInjector error paths", func() {
 	})
 
 	AfterEach(func() {
-		db := &databasev1.SQLiteDB{}
+		db := &databasev1.LitestreamReplica{}
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: errDBName, Namespace: namespace}, db); err == nil {
 			_ = k8sClient.Delete(ctx, db)
 		}
@@ -1062,7 +1062,7 @@ var _ = Describe("SidecarInjector error paths", func() {
 		Expect(resp.Result.Code).To(BeNumerically("==", 500))
 	})
 
-	It("returns an error when the referenced SQLiteDB does not exist", func() {
+	It("returns an error when the referenced LitestreamReplica does not exist", func() {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "err-pod-missing-db", Namespace: namespace,

@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: jlaska/sqlite-operator
+  IMAGE_NAME: jlaska/litestream-operator
 
 jobs:
   test:
@@ -187,12 +187,12 @@ jobs:
       uses: azure/setup-helm@v4
 
     - name: Lint chart
-      run: helm lint charts/sqlite-operator
+      run: helm lint charts/litestream-operator
 
     - name: Package chart
       run: |
         VERSION=${GITHUB_REF_NAME#v}
-        helm package charts/sqlite-operator \
+        helm package charts/litestream-operator \
           --version "${VERSION}" \
           --app-version "${VERSION}" \
           --destination release/
@@ -206,15 +206,15 @@ jobs:
     - name: Push chart to OCI registry
       run: |
         VERSION=${GITHUB_REF_NAME#v}
-        # Push to ghcr.io/jlaska/charts/sqlite-operator to avoid colliding
-        # with the container image at ghcr.io/jlaska/sqlite-operator.
-        helm push "release/sqlite-operator-${VERSION}.tgz" oci://ghcr.io/jlaska/charts
+        # Push to ghcr.io/jlaska/charts/litestream-operator to avoid colliding
+        # with the container image at ghcr.io/jlaska/litestream-operator.
+        helm push "release/litestream-operator-${VERSION}.tgz" oci://ghcr.io/jlaska/charts
 
     - name: Upload chart artifact
       uses: actions/upload-artifact@v4
       with:
         name: helm-chart
-        path: release/sqlite-operator-*.tgz
+        path: release/litestream-operator-*.tgz
         retention-days: 30
 
   release:
@@ -244,11 +244,11 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          release/sqlite-operator.yaml
+          release/litestream-operator.yaml
           release/samples.yaml
-          release/sqlite-operator-*.tgz
+          release/litestream-operator-*.tgz
         body: |
-          ## SQLite Operator ${{ github.ref_name }}
+          ## Litestream Operator ${{ github.ref_name }}
 
           ### Container Image
           ```
@@ -257,15 +257,15 @@ jobs:
 
           ### Install with Helm
           ```bash
-          helm install sqlite-operator oci://ghcr.io/jlaska/charts/sqlite-operator \
+          helm install litestream-operator oci://ghcr.io/jlaska/charts/litestream-operator \
             --version ${{ github.ref_name }} \
-            --namespace sqlite-operator-system \
+            --namespace litestream-operator-system \
             --create-namespace
           ```
 
           ### Install with kubectl (no Helm)
           ```bash
-          kubectl apply -f sqlite-operator.yaml
+          kubectl apply -f litestream-operator.yaml
           ```
 
           ### Changes

@@ -27,20 +27,20 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/jlaska/sqlite-operator/test/utils"
+	"github.com/jlaska/litestream-operator/test/utils"
 )
 
 // namespace where the project is deployed in
-const namespace = "sqlite-operator-system"
+const namespace = "litestream-operator-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "sqlite-operator-controller-manager"
+const serviceAccountName = "litestream-operator-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "sqlite-operator-controller-manager-metrics-service"
+const metricsServiceName = "litestream-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "sqlite-operator-metrics-binding"
+const metricsRoleBindingName = "litestream-operator-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -176,7 +176,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=sqlite-operator-metrics-reader",
+				"--clusterrole=litestream-operator-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)

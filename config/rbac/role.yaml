@@ -55,10 +55,10 @@ rules:
   - update
   - watch
 - apiGroups:
-  - database.example.com
+  - litestream.io
   resources:
-  - sqlitedbs
-  - sqliterestores
+  - litestreamreplicas
+  - litestreamrestores
   verbs:
   - create
   - delete
@@ -68,17 +68,17 @@ rules:
   - update
   - watch
 - apiGroups:
-  - database.example.com
+  - litestream.io
   resources:
-  - sqlitedbs/finalizers
-  - sqliterestores/finalizers
+  - litestreamreplicas/finalizers
+  - litestreamrestores/finalizers
   verbs:
   - update
 - apiGroups:
-  - database.example.com
+  - litestream.io
   resources:
-  - sqlitedbs/status
-  - sqliterestores/status
+  - litestreamreplicas/status
+  - litestreamrestores/status
   verbs:
   - get
   - patch
