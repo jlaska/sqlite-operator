@@ -54,9 +54,10 @@ const (
 )
 
 const (
-	injectEnabled    = "true"
-	pausedConfig     = "dbs: []\n"
-	litestreamSidecar = "litestream"
+	injectEnabled       = "true"
+	pausedConfig        = "dbs: []\n"
+	litestreamSidecar   = "litestream"
+	litestreamConfigKey = "litestream.yml"
 )
 
 // SQLiteDBReconciler reconciles a SQLiteDB object
@@ -135,7 +136,7 @@ func (r *SQLiteDBReconciler) reconcileLitestreamConfig(ctx context.Context, sqli
 			config = r.buildLitestreamConfig(sqliteDB)
 		}
 		cm.Data = map[string]string{
-			"litestream.yml": config,
+			litestreamConfigKey: config,
 		}
 		return controllerutil.SetControllerReference(sqliteDB, cm, r.Scheme)
 	})

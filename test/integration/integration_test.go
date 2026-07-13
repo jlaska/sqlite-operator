@@ -354,6 +354,82 @@ var _ = Describe("Replication Pause", Ordered, func() {
 	})
 })
 
+// ── Scenario: Multi-replica rejection ─────────────────────────────────────────
+//
+// Verifies the full end-to-end webhook rejection when a user targets a Deployment
+// that has replicas > 1. Litestream requires exactly one writer; the admitting
+// webhook must reject the SQLiteDB create at the API layer.
+
+var _ = Describe("Multi-Replica Rejection", func() {
+	const (
+		appName = "multi-rep-app"
+		dbName  = "multi-rep-db"
+		pvcName = "multi-rep-pvc"
+	)
+
+	BeforeEach(func() {
+		By("creating PVC and a 2-replica Deployment")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: %s
+  template:
+    metadata:
+      labels:
+        app: %s
+    spec:
+      containers:
+        - name: app
+          image: keinos/sqlite3:latest
+          command: ["sleep", "infinity"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: %s
+`, appName, testNamespace, appName, appName, pvcName))
+	})
+
+	AfterEach(func() {
+		runIgnoreError("kubectl", "delete", "sqlitedb", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+	})
+
+	It("webhook rejects SQLiteDB pointing at a multi-replica Deployment", func() {
+		By("attempting to create a SQLiteDB targeting the 2-replica Deployment")
+		manifest := fmt.Sprintf(`
+apiVersion: database.example.com/v1
+kind: SQLiteDB
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  databaseName: app.db
+  databasePath: /data
+  targetDeployment: %s
+`, dbName, testNamespace, appName)
+
+		out, err := applyLiteralQ(manifest)
+
+		// The webhook must reject the create with a validation error.
+		By("expecting admission rejection (replicas > 1 is a hard error)")
+		Expect(err).To(HaveOccurred(), "webhook should reject SQLiteDB targeting a 2-replica Deployment")
+		Expect(strings.ToLower(out)).To(ContainSubstring("replicas"),
+			"rejection message should mention replicas; got: %s", out)
+	})
+})
+
 // ── Scenario: Archive Check — Data Loss Recovery ──────────────────────────────
 
 var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {

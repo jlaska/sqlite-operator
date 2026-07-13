@@ -168,7 +168,7 @@ func (r *SQLiteRestoreReconciler) reconcilePausing(ctx context.Context, restore 
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval},
 			fmt.Errorf("getting litestream ConfigMap: %w", err)
 	}
-	if cm.Data["litestream.yml"] != pausedConfig {
+	if cm.Data[litestreamConfigKey] != pausedConfig {
 		log.Info("Waiting for ConfigMap to reflect pause")
 		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
 	}
@@ -601,7 +601,7 @@ func (r *SQLiteRestoreReconciler) reconcileRestoreConfig(ctx context.Context, re
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
 		cm.Data = map[string]string{
-			"litestream.yml": buildLitestreamConfigYAML(sourceDB),
+			litestreamConfigKey: buildLitestreamConfigYAML(sourceDB),
 		}
 		return controllerutil.SetControllerReference(restore, cm, r.Scheme)
 	})
