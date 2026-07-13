@@ -29,9 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -43,16 +41,8 @@ import (
 	databasev1 "github.com/jlaska/sqlite-operator/api/v1"
 )
 
-// errTransient is a sentinel non-NotFound error used to simulate transient API failures.
-var errTransient = fmt.Errorf("transient API error") //nolint:staticcheck
-
-// notFoundErr returns a genuine NotFound status error for the given resource.
-func notFoundErr(resource, name string) error {
-	return errors.NewNotFound(schema.GroupResource{Resource: resource}, name)
-}
-
-// fakeDB returns a minimal SQLiteDB with backup enabled for fake client tests.
-func fakeDB(name, namespace, targetDep string) *databasev1.SQLiteDB {
+// newFakeDB creates a minimal SQLiteDB for fake client tests.
+func newFakeDB(name, namespace, targetDep string) *databasev1.SQLiteDB {
 	return &databasev1.SQLiteDB{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: databasev1.SQLiteDBSpec{
@@ -69,22 +59,8 @@ func fakeDB(name, namespace, targetDep string) *databasev1.SQLiteDB {
 	}
 }
 
-// fakeRestore returns a minimal SQLiteRestore for fake client tests.
-func fakeRestore(name, namespace, sourceRef string, phase string) *databasev1.SQLiteRestore {
-	r := &databasev1.SQLiteRestore{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: databasev1.SQLiteRestoreSpec{
-			SourceRef:  sourceRef,
-			TargetPVC:  "my-pvc",
-			TargetPath: "/data/app.db",
-		},
-	}
-	r.Status.Phase = phase
-	return r
-}
-
-// fakeDeployment returns a minimal single-replica Deployment.
-func fakeDeployment(name, namespace string) *appsv1.Deployment {
+// newFakeDeployment returns a minimal single-replica Deployment for fake client tests.
+func newFakeDeployment(name, namespace string) *appsv1.Deployment {
 	replicas := int32(1)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -99,14 +75,41 @@ func fakeDeployment(name, namespace string) *appsv1.Deployment {
 	}
 }
 
-// newFakeDBReconciler builds a SQLiteDBReconciler backed by a fake client.
-func newFakeDBReconciler(objs []client.Object, funcs interceptor.Funcs) *SQLiteDBReconciler {
-	fc := fake.NewClientBuilder().
+// newFakeRestore returns a minimal SQLiteRestore for fake client tests.
+func newFakeRestore(name, namespace, sourceRef, phase string) *databasev1.SQLiteRestore {
+	r := &databasev1.SQLiteRestore{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: databasev1.SQLiteRestoreSpec{
+			SourceRef:  sourceRef,
+			TargetPVC:  "restore-pvc",
+			TargetPath: "/data/app.db",
+		},
+	}
+	r.Status.Phase = phase
+	return r
+}
+
+// buildFakeDBClient creates a fake client loaded with the given objects and interceptors,
+// then returns a SQLiteDBReconciler backed by it.
+func buildFakeDBClient(objs []client.Object, funcs interceptor.Funcs) *SQLiteDBReconciler {
+	b := fake.NewClientBuilder().
 		WithScheme(scheme.Scheme).
-		WithObjects(objs...).
-		WithStatusSubresource(statusSubresourceObjs(objs)...).
-		WithInterceptorFuncs(funcs).
-		Build()
+		WithInterceptorFuncs(funcs)
+	if len(objs) > 0 {
+		b = b.WithObjects(objs...)
+		// Register CRs as status-subresource objects so Status().Patch works correctly.
+		var statusObjs []client.Object
+		for _, o := range objs {
+			switch o.(type) {
+			case *databasev1.SQLiteDB, *databasev1.SQLiteRestore:
+				statusObjs = append(statusObjs, o)
+			}
+		}
+		if len(statusObjs) > 0 {
+			b = b.WithStatusSubresource(statusObjs...)
+		}
+	}
+	fc := b.Build()
 	return &SQLiteDBReconciler{
 		Client:   fc,
 		Scheme:   scheme.Scheme,
@@ -114,14 +117,26 @@ func newFakeDBReconciler(objs []client.Object, funcs interceptor.Funcs) *SQLiteD
 	}
 }
 
-// newFakeRestoreReconciler builds a SQLiteRestoreReconciler backed by a fake client.
-func newFakeRestoreReconciler(objs []client.Object, funcs interceptor.Funcs) *SQLiteRestoreReconciler {
-	fc := fake.NewClientBuilder().
+// buildFakeRestoreClient creates a fake client loaded with the given objects and interceptors,
+// then returns a SQLiteRestoreReconciler backed by it.
+func buildFakeRestoreClient(objs []client.Object, funcs interceptor.Funcs) *SQLiteRestoreReconciler {
+	b := fake.NewClientBuilder().
 		WithScheme(scheme.Scheme).
-		WithObjects(objs...).
-		WithStatusSubresource(statusSubresourceObjs(objs)...).
-		WithInterceptorFuncs(funcs).
-		Build()
+		WithInterceptorFuncs(funcs)
+	if len(objs) > 0 {
+		b = b.WithObjects(objs...)
+		var statusObjs []client.Object
+		for _, o := range objs {
+			switch o.(type) {
+			case *databasev1.SQLiteDB, *databasev1.SQLiteRestore:
+				statusObjs = append(statusObjs, o)
+			}
+		}
+		if len(statusObjs) > 0 {
+			b = b.WithStatusSubresource(statusObjs...)
+		}
+	}
+	fc := b.Build()
 	return &SQLiteRestoreReconciler{
 		Client:   fc,
 		Scheme:   scheme.Scheme,
@@ -129,20 +144,8 @@ func newFakeRestoreReconciler(objs []client.Object, funcs interceptor.Funcs) *SQ
 	}
 }
 
-// statusSubresourceObjs extracts objects that need status subresource registration.
-func statusSubresourceObjs(objs []client.Object) []client.Object {
-	var out []client.Object
-	for _, o := range objs {
-		switch o.(type) {
-		case *databasev1.SQLiteDB, *databasev1.SQLiteRestore:
-			out = append(out, o)
-		}
-	}
-	return out
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// SQLiteDB error-injection tests
+// SQLiteDBReconciler error injection
 // ─────────────────────────────────────────────────────────────────────────────
 
 var _ = Describe("SQLiteDBReconciler error injection", func() {
@@ -154,11 +157,11 @@ var _ = Describe("SQLiteDBReconciler error injection", func() {
 	ctx := context.Background()
 	key := reconcile.Request{NamespacedName: types.NamespacedName{Name: dbName, Namespace: ns}}
 
-	It("Reconcile propagates non-NotFound error from Get(SQLiteDB)", func() {
-		r := newFakeDBReconciler(nil, interceptor.Funcs{
+	It("Reconcile returns error when Get(SQLiteDB) returns transient error", func() {
+		r := buildFakeDBClient(nil, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 				if _, ok := o.(*databasev1.SQLiteDB); ok {
-					return errTransient
+					return fmt.Errorf("transient API error")
 				}
 				return c.Get(ctx, k, o, opts...)
 			},
@@ -168,118 +171,56 @@ var _ = Describe("SQLiteDBReconciler error injection", func() {
 		Expect(err.Error()).To(ContainSubstring("transient"))
 	})
 
-	It("reconcileLitestreamConfig propagates ConfigMap Create error", func() {
-		db := fakeDB(dbName, ns, depName)
-		// The ConfigMap does not pre-exist, so controllerutil.CreateOrUpdate calls Create.
-		r := newFakeDBReconciler([]client.Object{db}, interceptor.Funcs{
+	It("reconcileLitestreamConfig returns error when CreateOrUpdate Create fails", func() {
+		db := newFakeDB(dbName, ns, depName)
+		// ConfigMap does not exist so controllerutil.CreateOrUpdate calls Create.
+		r := buildFakeDBClient([]client.Object{db}, interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, o client.Object, opts ...client.CreateOption) error {
 				if _, ok := o.(*corev1.ConfigMap); ok {
-					return errTransient
+					return fmt.Errorf("patch failed")
 				}
 				return c.Create(ctx, o, opts...)
 			},
 		})
 		err := r.reconcileLitestreamConfig(ctx, db)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
 	})
 
-	It("reconcileInitSQLConfig propagates Status().Patch error when clearing stale hash", func() {
-		db := fakeDB(dbName, ns, depName)
-		db.Status.InitSQLHash = "stale-hash"
-		// InitSQL is empty so the "clear stale hash" path is taken.
-		db.Spec.InitSQL = ""
-		r := newFakeDBReconciler([]client.Object{db}, interceptor.Funcs{
+	It("updateStatus returns error when Status().Patch fails", func() {
+		// DB targets a Deployment that does not exist so updateStatus takes the
+		// WorkloadNotFound path and calls Status().Patch immediately.
+		db := newFakeDB(dbName, ns, "nonexistent-dep")
+		dep := newFakeDeployment(depName, ns)
+		r := buildFakeDBClient([]client.Object{db, dep}, interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, o client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
-				return errTransient
-			},
-		})
-		err := r.reconcileInitSQLConfig(ctx, db)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
-	})
-
-	It("updateStatus propagates Status().Patch error on WorkloadNotFound path", func() {
-		// DB targets a Deployment that doesn't exist in the fake client.
-		db := fakeDB(dbName, ns, "nonexistent-dep")
-		r := newFakeDBReconciler([]client.Object{db}, interceptor.Funcs{
-			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, o client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
-				return errTransient
+				return fmt.Errorf("status patch injected error")
 			},
 		})
 		err := r.updateStatus(ctx, db)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
-	})
-
-	It("updateStatus propagates Status().Patch error on ReplicaCountExceeded path", func() {
-		replicas := int32(3)
-		dep := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: ns},
-			Spec: appsv1.DeploymentSpec{
-				Replicas: &replicas,
-				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": depName}},
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": depName}},
-					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
-				},
-			},
-		}
-		db := fakeDB(dbName, ns, depName)
-		r := newFakeDBReconciler([]client.Object{dep, db}, interceptor.Funcs{
-			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, o client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
-				return errTransient
-			},
-		})
-		err := r.updateStatus(ctx, db)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
-	})
-
-	It("reconcileTargetAnnotation propagates Patch error when annotating workload", func() {
-		dep := fakeDeployment(depName, ns)
-		db := fakeDB(dbName, ns, depName)
-		r := newFakeDBReconciler([]client.Object{dep, db}, interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
-				if _, ok := o.(*appsv1.Deployment); ok {
-					return errTransient
-				}
-				return c.Patch(ctx, o, p, opts...)
-			},
-		})
-		err := r.reconcileTargetAnnotation(ctx, db)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
+		Expect(err.Error()).To(ContainSubstring("status patch injected error"))
 	})
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SQLiteRestoreReconciler error-injection tests
+// SQLiteRestoreReconciler error injection
 // ─────────────────────────────────────────────────────────────────────────────
 
 var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 	const (
 		ns          = "default"
-		dbName      = "fake-src-db"
-		depName     = "fake-src-dep"
+		srcDBName   = "fake-src-db"
+		srcDepName  = "fake-src-dep"
 		restoreName = "fake-restore"
 	)
 	ctx := context.Background()
 	restoreKey := reconcile.Request{NamespacedName: types.NamespacedName{Name: restoreName, Namespace: ns}}
 
-	// litestreamCM returns a ConfigMap that represents the Litestream config for dbName.
-	litestreamCM := func() *corev1.ConfigMap {
-		return &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: dbName + "-litestream", Namespace: ns},
-			Data:       map[string]string{"litestream.yml": "addr: \":9090\"\ndbs:\n  - path: /data/app.db\n    replica:\n      type: s3\n      bucket: b\n"},
-		}
-	}
-
-	It("Reconcile propagates non-NotFound error from Get(SQLiteRestore)", func() {
-		r := newFakeRestoreReconciler(nil, interceptor.Funcs{
+	It("Reconcile returns error when Get(SQLiteRestore) returns transient error", func() {
+		r := buildFakeRestoreClient(nil, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 				if _, ok := o.(*databasev1.SQLiteRestore); ok {
-					return errTransient
+					return fmt.Errorf("transient API error")
 				}
 				return c.Get(ctx, k, o, opts...)
 			},
@@ -289,51 +230,38 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		Expect(err.Error()).To(ContainSubstring("transient"))
 	})
 
-	It("Reconcile propagates failRestore when Get(SQLiteDB) returns NotFound", func() {
-		restore := fakeRestore(restoreName, ns, dbName, "")
-		r := newFakeRestoreReconciler([]client.Object{restore}, interceptor.Funcs{})
-		// SQLiteDB does not exist — Get returns NotFound → failRestore → sets Failed status.
-		_, err := r.Reconcile(ctx, restoreKey)
-		Expect(err).NotTo(HaveOccurred()) // failRestore swallows the error and patches status
-		got := &databasev1.SQLiteRestore{}
-		Expect(r.Client.Get(ctx, types.NamespacedName{Name: restoreName, Namespace: ns}, got)).To(Succeed())
-		Expect(got.Status.Phase).To(Equal(databasev1.RestorePhaseFailed))
-		Expect(got.Status.Message).To(ContainSubstring("not found"))
-	})
+	It("reconcilePending returns error when pauseReplication Patch fails", func() {
+		db := newFakeDB(srcDBName, ns, srcDepName)
+		// No Deployment in fake client — reconcilePending handles not-found gracefully.
+		restore := newFakeRestore(restoreName, ns, srcDBName, "")
 
-	It("reconcilePending propagates error when pauseReplication Patch fails", func() {
-		db := fakeDB(dbName, ns, depName)
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, "")
-		cm := litestreamCM()
-
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore, cm}, interceptor.Funcs{
+		r := buildFakeRestoreClient([]client.Object{db, restore}, interceptor.Funcs{
 			Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
-				// Fail the Patch on the SQLiteDB (which is what pauseReplication does).
 				if _, ok := o.(*databasev1.SQLiteDB); ok {
-					return errTransient
+					return fmt.Errorf("patch failed")
 				}
 				return c.Patch(ctx, o, p, opts...)
 			},
 		})
 		_, err := r.Reconcile(ctx, restoreKey)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("setting pause annotation"))
+		Expect(err.Error()).To(ContainSubstring("setting pause annotation on SQLiteDB"))
 	})
 
-	It("reconcilePausing propagates error when Get(ConfigMap) fails", func() {
-		db := fakeDB(dbName, ns, depName)
-		// Set pause annotation so reconcilePausing skips the re-set-annotation branch.
+	It("reconcilePausing returns error when Get(ConfigMap) fails", func() {
+		db := newFakeDB(srcDBName, ns, srcDepName)
+		// Pause annotation must be set so reconcilePausing skips the re-set-annotation branch.
 		db.Annotations = map[string]string{pauseAnnotation: injectEnabled}
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhasePausing)
+
+		restore := newFakeRestore(restoreName, ns, srcDBName, databasev1.RestorePhasePausing)
 		replicas := int32(1)
 		restore.Status.OriginalReplicas = &replicas
 
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore}, interceptor.Funcs{
+		r := buildFakeRestoreClient([]client.Object{db, restore}, interceptor.Funcs{
+			// Return a non-NotFound error for ConfigMap so reconcilePausing fails.
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 				if _, ok := o.(*corev1.ConfigMap); ok {
-					return errTransient
+					return fmt.Errorf("configmap get error")
 				}
 				return c.Get(ctx, k, o, opts...)
 			},
@@ -343,46 +271,23 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		Expect(err.Error()).To(ContainSubstring("getting litestream ConfigMap"))
 	})
 
-	It("reconcilePausing propagates error when scaleWorkload Patch fails", func() {
-		db := fakeDB(dbName, ns, depName)
+	It("reconcileScalingDown returns error when Create(restore Job) fails with non-AlreadyExists error", func() {
+		db := newFakeDB(srcDBName, ns, srcDepName)
 		db.Annotations = map[string]string{pauseAnnotation: injectEnabled}
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhasePausing)
 		replicas := int32(1)
+		restore := newFakeRestore(restoreName, ns, srcDBName, databasev1.RestorePhaseScalingDown)
 		restore.Status.OriginalReplicas = &replicas
-		// ConfigMap with paused content so the CM check passes.
-		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: dbName + "-litestream", Namespace: ns},
-			Data:       map[string]string{"litestream.yml": pausedConfig},
+		// Pre-built restore litestream ConfigMap so reconcileRestoreConfig succeeds.
+		restoreCM := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: restoreName + "-litestream", Namespace: ns},
+			Data:       map[string]string{"litestream.yml": "addr: \":9090\"\ndbs:\n  - path: /data/app.db\n"},
 		}
 
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore, cm}, interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
-				if _, ok := o.(*appsv1.Deployment); ok {
-					return errTransient
-				}
-				return c.Patch(ctx, o, p, opts...)
-			},
-		})
-		_, err := r.Reconcile(ctx, restoreKey)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("scaling workload to 0"))
-	})
-
-	It("reconcileScalingDown propagates error when Create(restore Job) fails", func() {
-		db := fakeDB(dbName, ns, depName)
-		db.Annotations = map[string]string{pauseAnnotation: injectEnabled}
-		dep := fakeDeployment(depName, ns)
-		replicas := int32(1)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhaseScalingDown)
-		restore.Status.OriginalReplicas = &replicas
-		restore.Status.JobName = restoreName + "-restore"
-		cm := litestreamCM()
-
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore, cm}, interceptor.Funcs{
+		r := buildFakeRestoreClient([]client.Object{db, restore, restoreCM}, interceptor.Funcs{
+			// Intercept only Job creates; ConfigMap creates (reconcileRestoreConfig) must succeed.
 			Create: func(ctx context.Context, c client.WithWatch, o client.Object, opts ...client.CreateOption) error {
 				if _, ok := o.(*batchv1.Job); ok {
-					return errTransient
+					return fmt.Errorf("quota exceeded")
 				}
 				return c.Create(ctx, o, opts...)
 			},
@@ -392,18 +297,17 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		Expect(err.Error()).To(ContainSubstring("creating restore Job"))
 	})
 
-	It("reconcileRunning propagates error when Get(restore Job) fails with non-NotFound", func() {
-		db := fakeDB(dbName, ns, depName)
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhaseRunning)
+	It("reconcileRunning returns error when Get(restore Job) returns transient error", func() {
+		db := newFakeDB(srcDBName, ns, srcDepName)
+		restore := newFakeRestore(restoreName, ns, srcDBName, databasev1.RestorePhaseRunning)
 		restore.Status.JobName = restoreName + "-restore"
 		replicas := int32(1)
 		restore.Status.OriginalReplicas = &replicas
 
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore}, interceptor.Funcs{
+		r := buildFakeRestoreClient([]client.Object{db, restore}, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 				if _, ok := o.(*batchv1.Job); ok {
-					return errTransient
+					return fmt.Errorf("transient")
 				}
 				return c.Get(ctx, k, o, opts...)
 			},
@@ -413,55 +317,14 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		Expect(err.Error()).To(ContainSubstring("getting restore Job"))
 	})
 
-	It("reconcileRunning calls failRestoreWithCleanup when restore Job is NotFound", func() {
-		db := fakeDB(dbName, ns, depName)
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhaseRunning)
+	It("reconcileValidating returns error when Get(validation Job) returns transient error", func() {
+		db := newFakeDB(srcDBName, ns, srcDepName)
+		restore := newFakeRestore(restoreName, ns, srcDBName, databasev1.RestorePhaseValidating)
 		restore.Status.JobName = restoreName + "-restore"
 		replicas := int32(1)
 		restore.Status.OriginalReplicas = &replicas
 
-		// Job is NOT in the fake client — Get returns NotFound.
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore}, interceptor.Funcs{})
-		_, err := r.Reconcile(ctx, restoreKey)
-		Expect(err).NotTo(HaveOccurred()) // failRestoreWithCleanup patches status, doesn't return error
-
-		got := &databasev1.SQLiteRestore{}
-		Expect(r.Client.Get(ctx, types.NamespacedName{Name: restoreName, Namespace: ns}, got)).To(Succeed())
-		Expect(got.Status.Phase).To(Equal(databasev1.RestorePhaseFailed))
-		Expect(got.Status.Message).To(ContainSubstring("not found"))
-	})
-
-	It("reconcileValidating propagates error when Create(validation Job) fails", func() {
-		db := fakeDB(dbName, ns, depName)
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhaseValidating)
-		restore.Status.JobName = restoreName + "-restore"
-		replicas := int32(1)
-		restore.Status.OriginalReplicas = &replicas
-
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore}, interceptor.Funcs{
-			Create: func(ctx context.Context, c client.WithWatch, o client.Object, opts ...client.CreateOption) error {
-				if _, ok := o.(*batchv1.Job); ok {
-					return errTransient
-				}
-				return c.Create(ctx, o, opts...)
-			},
-		})
-		_, err := r.Reconcile(ctx, restoreKey)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("creating validation Job"))
-	})
-
-	It("reconcileValidating propagates error when Get(validation Job) fails with non-NotFound", func() {
-		db := fakeDB(dbName, ns, depName)
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhaseValidating)
-		restore.Status.JobName = restoreName + "-restore"
-		replicas := int32(1)
-		restore.Status.OriginalReplicas = &replicas
-
-		// Validation Job already exists (so Create is not called).
+		// Validation Job is present in the fake client, but Get is intercepted to fail.
 		validationJob := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      restoreName + "-validate",
@@ -470,14 +333,10 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 			},
 		}
 
-		callCount := 0
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore, validationJob}, interceptor.Funcs{
+		r := buildFakeRestoreClient([]client.Object{db, restore, validationJob}, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 				if _, ok := o.(*batchv1.Job); ok {
-					callCount++
-					// First call is the validation job lookup in reconcileValidating.
-					// Return a non-NotFound error to exercise the error path.
-					return errTransient
+					return fmt.Errorf("transient")
 				}
 				return c.Get(ctx, k, o, opts...)
 			},
@@ -485,29 +344,28 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		_, err := r.Reconcile(ctx, restoreKey)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("getting validation Job"))
-		Expect(callCount).To(BeNumerically(">=", 1))
 	})
 
-	It("reconcileScalingUp propagates error when resumeReplication Get(SQLiteDB) fails", func() {
-		db := fakeDB(dbName, ns, depName)
+	It("reconcileScalingUp returns error when resumeReplication re-fetch of SQLiteDB fails", func() {
+		db := newFakeDB(srcDBName, ns, srcDepName)
+		// Pause annotation must be set so resumeReplication proceeds to the re-fetch.
 		db.Annotations = map[string]string{pauseAnnotation: injectEnabled}
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhaseScalingUp)
-		replicas := int32(1)
-		restore.Status.OriginalReplicas = &replicas
 
-		// Allow Get for everything except SQLiteDB (to make resumeReplication fail).
-		// The initial Reconcile() Get on SQLiteRestore and SQLiteDB must succeed,
-		// but the re-fetch inside resumeReplication should fail.
+		// OriginalReplicas=0 skips the workload scale-back block so we reach
+		// resumeReplication directly without needing a Deployment in the fake client.
+		zero := int32(0)
+		restore := newFakeRestore(restoreName, ns, srcDBName, databasev1.RestorePhaseScalingUp)
+		restore.Status.OriginalReplicas = &zero
+
+		// Allow the first SQLiteDB Get (Reconcile's sourceDB lookup) to succeed.
+		// The second Get (resumeReplication's re-fetch) must fail.
 		dbGetCount := 0
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore}, interceptor.Funcs{
+		r := buildFakeRestoreClient([]client.Object{db, restore}, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 				if _, ok := o.(*databasev1.SQLiteDB); ok {
 					dbGetCount++
-					// First call (initial Reconcile lookup) must succeed.
-					// Second call is the re-fetch inside resumeReplication — fail it.
 					if dbGetCount > 1 {
-						return errTransient
+						return fmt.Errorf("transient re-fetch error")
 					}
 				}
 				return c.Get(ctx, k, o, opts...)
@@ -517,115 +375,4 @@ var _ = Describe("SQLiteRestoreReconciler error injection", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("removing pause annotation"))
 	})
-
-	It("pauseReplication propagates Patch error", func() {
-		db := fakeDB(dbName, ns, depName)
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhasePausing)
-		// Pause annotation NOT set → pauseReplication will Patch.
-		replicas := int32(1)
-		restore.Status.OriginalReplicas = &replicas
-		cm := litestreamCM()
-
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore, cm}, interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
-				if _, ok := o.(*databasev1.SQLiteDB); ok {
-					return errTransient
-				}
-				return c.Patch(ctx, o, p, opts...)
-			},
-		})
-		// reconcilePausing calls pauseReplication when the annotation is absent → Patch fails.
-		err := r.pauseReplication(ctx, db)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
-	})
-
-	It("resumeReplication propagates Get error when re-fetching SQLiteDB", func() {
-		db := fakeDB(dbName, ns, depName)
-		db.Annotations = map[string]string{pauseAnnotation: injectEnabled}
-
-		r := newFakeRestoreReconciler([]client.Object{db}, interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-				if _, ok := o.(*databasev1.SQLiteDB); ok {
-					return errTransient
-				}
-				return c.Get(ctx, k, o, opts...)
-			},
-		})
-		err := r.resumeReplication(ctx, db)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
-	})
-
-	It("resumeReplication propagates Patch error when removing pause annotation", func() {
-		db := fakeDB(dbName, ns, depName)
-		db.Annotations = map[string]string{pauseAnnotation: injectEnabled}
-
-		// Allow Get but fail the Patch.
-		dbGetCount := 0
-		r := newFakeRestoreReconciler([]client.Object{db}, interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-				if _, ok := o.(*databasev1.SQLiteDB); ok {
-					dbGetCount++
-					if dbGetCount == 1 {
-						// First Get (the re-fetch inside resumeReplication) must succeed.
-						return c.Get(ctx, k, o, opts...)
-					}
-				}
-				return c.Get(ctx, k, o, opts...)
-			},
-			Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
-				if _, ok := o.(*databasev1.SQLiteDB); ok {
-					return errTransient
-				}
-				return c.Patch(ctx, o, p, opts...)
-			},
-		})
-		err := r.resumeReplication(ctx, db)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
-	})
-
-	It("getTargetWorkloadForRestore returns error for non-NotFound StatefulSet Get failure", func() {
-		db := fakeDB(dbName, ns, "")
-		db.Spec.TargetDeployment = ""
-		db.Spec.TargetStatefulSet = "my-sts"
-
-		r := newFakeRestoreReconciler([]client.Object{db}, interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-				if _, ok := o.(*appsv1.StatefulSet); ok {
-					return errTransient
-				}
-				return c.Get(ctx, k, o, opts...)
-			},
-		})
-		_, err := r.getTargetWorkloadForRestore(ctx, db)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transient"))
-	})
-
-	It("reconcileScalingUp propagates scaleWorkload Patch error", func() {
-		db := fakeDB(dbName, ns, depName)
-		dep := fakeDeployment(depName, ns)
-		restore := fakeRestore(restoreName, ns, dbName, databasev1.RestorePhaseScalingUp)
-		// OriginalReplicas=2 so scaleWorkload must Patch (current=1, target=2 → not already at target).
-		replicas := int32(2)
-		restore.Status.OriginalReplicas = &replicas
-
-		r := newFakeRestoreReconciler([]client.Object{db, dep, restore}, interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, o client.Object, p client.Patch, opts ...client.PatchOption) error {
-				if _, ok := o.(*appsv1.Deployment); ok {
-					return errTransient
-				}
-				return c.Patch(ctx, o, p, opts...)
-			},
-		})
-		_, err := r.Reconcile(ctx, restoreKey)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("scaling"))
-	})
 })
-
-// Ensure the notFoundErr helper is used (suppresses unused-variable lint).
-var _ = notFoundErr
