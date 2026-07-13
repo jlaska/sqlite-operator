@@ -959,7 +959,11 @@ var _ = Describe("SQLiteDB Controller reconcileInitSQLConfig edge cases", func()
 
 		r := newReconciler()
 		// First reconcile: creates ConfigMap, writes hash.
-		Expect(r.reconcileInitSQLConfig(ctx, db)).To(Succeed())
+		// Eventually retries on 409 — the background manager may race to create
+		// the same ConfigMap when it picks up the new SQLiteDB object.
+		Eventually(func() error {
+			return r.reconcileInitSQLConfig(ctx, db)
+		}).Should(Succeed())
 
 		// Re-fetch to get the updated status.
 		Expect(k8sClient.Get(ctx, dbKey, db)).To(Succeed())
