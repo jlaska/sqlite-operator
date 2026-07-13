@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	defaultLitestreamImage  = "litestream/litestream:0.5.14"
+	defaultLitestreamImage  = databasev1.LitestreamDefaultImage
 	restoreRequeueInterval  = 5 * time.Second
 	restoreLabelKey         = "sqlite.database.example.com/restore"
 	restoreTargetVolumeName = "target"

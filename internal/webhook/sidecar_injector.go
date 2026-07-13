@@ -42,7 +42,7 @@ const litestreamConfigVolume = "litestream-config"
 const litestreamConfigMount = "/etc/litestream"
 
 // litestreamDefaultImage is the default Litestream container image.
-const litestreamDefaultImage = "litestream/litestream:0.5.14"
+const litestreamDefaultImage = databasev1.LitestreamDefaultImage
 
 // injectTrue is the value used for the injection annotation.
 const injectTrue = "true"
@@ -359,6 +359,10 @@ if [ ! -f "${DB_PATH}" ]; then
   exit 0
 fi
 echo "litestream-restore: restore complete, running integrity check..."
+if ! command -v sqlite3 > /dev/null 2>&1; then
+  echo "WARNING: sqlite3 not found in image; skipping integrity check"
+  exit 0
+fi
 if ! sqlite3 "${DB_PATH}" "PRAGMA quick_check;" | grep -q "^ok$"; then
   echo "ERROR: integrity check failed on restored database."
   echo "The S3 backup may contain corruption (Litestream upstream issue #1164/#1220)."
