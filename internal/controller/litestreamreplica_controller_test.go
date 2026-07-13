@@ -608,9 +608,9 @@ var _ = Describe("litestreamContainerState and archiveCheckState", func() {
 	ctx := context.Background()
 
 	var (
-		deployment *appsv1.Deployment
-		litestreamReplica   *databasev1.LitestreamReplica
-		reconciler *LitestreamReplicaReconciler
+		deployment        *appsv1.Deployment
+		litestreamReplica *databasev1.LitestreamReplica
+		reconciler        *LitestreamReplicaReconciler
 	)
 
 	BeforeEach(func() {

@@ -623,7 +623,7 @@ spec:
 
 func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string) string {
 	db := &databasev1.LitestreamReplica{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "database.example.com/v1", Kind: "LitestreamReplica"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamReplica"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: databasev1.LitestreamReplicaSpec{
 			DatabaseName:     dbFile,
@@ -654,7 +654,7 @@ func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEn
 
 func litestreamRestoreManifest(name, ns, sourceRef, pvc, targetPath string) string {
 	restore := &databasev1.LitestreamRestore{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "database.example.com/v1", Kind: "LitestreamRestore"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamRestore"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: databasev1.LitestreamRestoreSpec{
 			SourceRef:  sourceRef,

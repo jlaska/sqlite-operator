@@ -97,7 +97,7 @@ var _ = BeforeSuite(func() {
 	Expect((&LitestreamReplicaReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("litestreamreplica-controller"),
+		Recorder: mgr.GetEventRecorderFor("litestreamreplica-controller"), //nolint:staticcheck
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {

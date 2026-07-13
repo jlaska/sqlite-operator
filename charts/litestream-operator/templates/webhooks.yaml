@@ -50,7 +50,7 @@ webhooks:
       service:
         name: {{ include "litestream-operator.webhookServiceName" . }}
         namespace: {{ .Release.Namespace }}
-        path: /validate-database-example-com-v1-litestreamreplica
+        path: /validate-litestream-io-v1-litestreamreplica
     rules:
       - apiGroups: ["litestream.io"]
         apiVersions: ["v1"]
