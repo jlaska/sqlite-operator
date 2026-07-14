@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches-ignore: [ main, develop ]
+    branches-ignore: [ develop ]
   pull_request:
     branches: [ main ]
 
