@@ -1172,15 +1172,21 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 
 		r := newReconciler()
 
-		db := &databasev1.LitestreamReplica{}
-		Expect(k8sClient.Get(ctx, dbKey, db)).To(Succeed())
-		if db.Annotations == nil {
-			db.Annotations = map[string]string{}
-		}
-		db.Annotations[databasev1.AnnotationPause] = "true"
-		Expect(k8sClient.Update(ctx, db)).To(Succeed())
+		// Use Eventually to handle any 409 conflict from the background reconciler.
+		Eventually(func() error {
+			db := &databasev1.LitestreamReplica{}
+			if err := k8sClient.Get(ctx, dbKey, db); err != nil {
+				return err
+			}
+			if db.Annotations == nil {
+				db.Annotations = map[string]string{}
+			}
+			db.Annotations[databasev1.AnnotationPause] = "true"
+			return k8sClient.Update(ctx, db)
+		}).Should(Succeed())
 
 		// Should return nil immediately without another patch.
+		db := &databasev1.LitestreamReplica{}
 		Expect(k8sClient.Get(ctx, dbKey, db)).To(Succeed())
 		Expect(r.pauseReplication(ctx, db)).To(Succeed())
 		_ = restoreKey
