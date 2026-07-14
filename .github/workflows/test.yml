@@ -61,3 +61,49 @@ jobs:
           config: ./.testcoverage.yml
           git-token: ${{ github.token }}
           git-branch: badges
+
+  lint-badge:
+    name: Update lint badge
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run linter
+        id: lint
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+      - name: Generate badge SVG
+        run: |
+          if [ "${{ steps.lint.outcome }}" = "success" ]; then
+            STATUS="passing"; COLOR="brightgreen"
+          else
+            STATUS="failing"; COLOR="red"
+          fi
+          curl -sf "https://img.shields.io/badge/lint-${STATUS}-${COLOR}" \
+            -o /tmp/lint.svg
+
+      - name: Push badge to badges branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin badges:badges
+          git checkout badges
+          mkdir -p .badges/main
+          cp /tmp/lint.svg .badges/main/lint.svg
+          git add .badges/main/lint.svg
+          git diff --cached --quiet && exit 0
+          git commit -m "Update lint badge [skip ci]"
+          git push origin badges
