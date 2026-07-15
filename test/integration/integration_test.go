@@ -573,6 +573,492 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 	})
 })
 
+// ── TC-01: First-Time Setup ───────────────────────────────────────────────
+//
+// When no DB file and no S3 backup exist, the archive-check init container
+// should detect first-time setup and allow the pod to start normally.
+
+var _ = Describe("First-Time Setup", Ordered, func() {
+	const (
+		appName = "first-time-app"
+		dbName  = "first-time-db"
+		pvcName = "first-time-pvc"
+		dbFile  = "firsttime.db"
+		dbPath  = "/data"
+	)
+
+	BeforeAll(func() {
+		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
+
+		By("creating PVC and Deployment (no prior S3 data at this unique path)")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=condition=Available", "--timeout=3m")
+
+		By("creating LitestreamReplica with backup enabled (unique S3 path, no prior data)")
+		applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, ""))
+	})
+
+	AfterAll(func() {
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+	})
+
+	It("archive-check passes and pod starts normally when no S3 backup exists", func() {
+		By("waiting for pod to reach Running (archive-check must not block it)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"--field-selector=status.phase=Running",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).NotTo(BeEmpty(), "pod should be Running — archive-check must not block first-time startup")
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying archive-check init container exited 0 (if it ran)")
+		// The archive-check container may have already completed by the time we check.
+		// A Running pod guarantees all init containers succeeded (exit 0).
+		out, _ := kubectlQ("get", "pods", "-n", testNamespace,
+			"-l", "app="+appName,
+			"-o", `jsonpath={range .items[*]}{range .status.initContainerStatuses[*]}{.name}={.state.terminated.exitCode}{"\n"}{end}{end}`)
+		if out != "" {
+			Expect(out).NotTo(ContainSubstring("litestream-archive-check=1"),
+				"archive-check must not exit 1 on first-time setup")
+		}
+
+		By("verifying LitestreamReplica reaches Ready phase")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("Ready"))
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying BackupHealthy=True after sidecar begins replicating")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+	})
+})
+
+// ── TC-03: autoRestore=true — Automatic Restore on Startup ───────────────
+//
+// When autoRestore=true and the DB is missing but S3 has data, the restore
+// init container runs automatically and the pod starts with restored data.
+
+var _ = Describe("Auto-Restore on Startup", Ordered, func() {
+	const (
+		appName   = "auto-restore-app"
+		dbName    = "auto-restore-db"
+		pvcName   = "auto-restore-pvc"
+		dbFile    = "autorestore.db"
+		dbPath    = "/data"
+		initSQL   = "CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY, value TEXT);"
+		testValue = "auto-restore-test-value"
+	)
+
+	BeforeAll(func() {
+		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
+
+		By("creating PVC, Deployment, and LitestreamReplica with autoRestore=true")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=condition=Available", "--timeout=3m")
+		applyLiteral(litestreamReplicaManifestWithOpts(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL, true))
+
+		By("waiting for sidecar injection and BackupHealthy=True")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("writing test data to the database")
+		podName := runningPod(appName)
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", dbPath+"/"+dbFile,
+			"INSERT INTO records(value) VALUES('"+testValue+"');")
+
+		By("waiting for Litestream to replicate the row to MinIO")
+		Eventually(func(g Gomega) {
+			out := mcList(minioBucket + "/" + dbName + "/")
+			if out == "" {
+				all, _ := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
+					"/bin/sh", "-c", "mc ls --recursive local/"+minioBucket+"/")
+				g.Expect(out).NotTo(BeEmpty(),
+					"expected backup objects at %s/%s/ — full bucket contents:\n%s",
+					minioBucket, dbName, all)
+			} else {
+				g.Expect(out).NotTo(BeEmpty())
+			}
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+	})
+
+	AfterAll(func() {
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+	})
+
+	It("auto-restores DB from S3 on startup when DB is missing and autoRestore=true", func() {
+		podName := runningPod(appName)
+
+		By("deleting the DB file and litestream state directory to simulate data loss")
+		// Use the litestream container: the state dir is owned by it, not the app container.
+		// Also remove the db-init marker (.db-init-*) so the db-init init container re-applies
+		// the schema on the next pod start — otherwise it sees the marker from the original run
+		// and skips CREATE TABLE, leaving the restored DB without a schema.
+		kubectl("exec", "-n", testNamespace, podName, "-c", "litestream",
+			"--", "sh", "-c",
+			"rm -rf "+dbPath+"/"+dbFile+" "+dbPath+"/."+dbFile+"-litestream "+dbPath+"/.db-init-*")
+
+		By("scaling Deployment to 0 then back to 1 to trigger pod restart")
+		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=0")
+		// Wait for all pods to fully terminate (not just rollout status) before scaling back up.
+		// rollout status returns when desired=0 replicas are met, but pods may still be in
+		// Terminating state (phase=Running) and holding the PVC, which can race with the new
+		// pod's restore init container.
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"-o", "jsonpath={.items}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(SatisfyAny(BeEmpty(), Equal("[]")))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=1")
+
+		By("waiting for pod to reach Running (restore init container must succeed)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"--field-selector=status.phase=Running",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).NotTo(BeEmpty(), "pod should be Running after auto-restore")
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying restore init container exited 0")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"-o", `jsonpath={range .items[*]}{range .status.initContainerStatuses[*]}{.name}={.state.terminated.exitCode}{"\n"}{end}{end}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring("litestream-restore=0"),
+				"auto-restore init container should exit 0")
+		}).Should(Succeed())
+
+		By("verifying restored data is present in the database")
+		Eventually(func(g Gomega) {
+			pod, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"--field-selector=status.phase=Running",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(pod).NotTo(BeEmpty())
+			out, err := kubectlQ("exec", "-n", testNamespace, strings.TrimSpace(pod), "-c", "app",
+				"--", "sqlite3", dbPath+"/"+dbFile,
+				"SELECT value FROM records WHERE value='"+testValue+"';")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring(testValue))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying BackupHealthy=True after restore (Litestream resumed)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+	})
+})
+
+// ── TC-05: LitestreamRestore Fails When DB File Exists ───────────────────
+//
+// The LitestreamRestore Job fails when the target DB file already exists on
+// the PVC. The operator must still scale the Deployment back up after failure.
+
+var _ = Describe("Restore Fails With Existing DB", Ordered, func() {
+	const (
+		appName     = "restore-fail-app"
+		dbName      = "restore-fail-db"
+		pvcName     = "restore-fail-pvc"
+		restoreName = "restore-fail-restore"
+		dbFile      = "restorefail.db"
+		dbPath      = "/data"
+		initSQL     = "CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, val TEXT);"
+		testVal     = "restore-fail-test"
+	)
+
+	BeforeAll(func() {
+		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
+
+		By("creating PVC, Deployment, and LitestreamReplica with backup enabled")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=condition=Available", "--timeout=3m")
+		applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+
+		By("waiting for sidecar injection and BackupHealthy=True")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("writing test data to ensure S3 has a valid backup")
+		podName := runningPod(appName)
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", dbPath+"/"+dbFile,
+			"INSERT INTO entries(val) VALUES('"+testVal+"');")
+
+		By("waiting for replication to MinIO")
+		Eventually(func(g Gomega) {
+			out := mcList(minioBucket + "/" + dbName + "/")
+			g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO")
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+	})
+
+	AfterAll(func() {
+		runIgnoreError("kubectl", "delete", "litestreamrestore", restoreName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+	})
+
+	It("restore Job fails and Deployment is scaled back when DB file already exists on PVC", func() {
+		By("confirming the DB file is present on the PVC (do NOT delete it)")
+		podName := runningPod(appName)
+		out, err := kubectlQ("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "ls", dbPath+"/"+dbFile)
+		Expect(err).NotTo(HaveOccurred(), "DB file should exist on PVC before restore attempt")
+		Expect(out).To(ContainSubstring(dbFile))
+
+		By("recording current Deployment replica count")
+		replicaOut := kubectl("get", "deployment", appName, "-n", testNamespace,
+			"-o", "jsonpath={.spec.replicas}")
+		Expect(replicaOut).To(Equal("1"), "expected Deployment to have 1 replica before restore")
+
+		By("applying LitestreamRestore CR targeting the PVC with the existing DB file")
+		applyLiteral(litestreamRestoreManifest(restoreName, testNamespace, dbName, pvcName, dbPath+"/"+dbFile))
+
+		By("waiting for LitestreamRestore to reach Failed phase")
+		Eventually(func(g Gomega) {
+			phase, err := kubectlQ("get", "litestreamrestore", restoreName, "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			if phase == "Running" || phase == "ScalingDown" || phase == "Pausing" {
+				jobName, _ := kubectlQ("get", "litestreamrestore", restoreName, "-n", testNamespace,
+					"-o", "jsonpath={.status.jobName}")
+				if jobName != "" {
+					logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=30", "--request-timeout=15s")
+					GinkgoWriter.Printf("\n=== restore job logs ===\n%s\n========================\n", logs)
+				}
+			}
+			g.Expect(phase).To(Equal("Failed"),
+				"restore should fail because the DB file already exists on the PVC")
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying status.message surfaces the litestream error (output file already exists)")
+		statusMsg, err := kubectlQ("get", "litestreamrestore", restoreName, "-n", testNamespace,
+			"-o", "jsonpath={.status.message}")
+		Expect(err).NotTo(HaveOccurred())
+		// Litestream refuses to overwrite an existing DB: the error must be visible in the
+		// status so users know they need to remove the file before restoring.
+		Expect(statusMsg).To(ContainSubstring("already exists"),
+			"status.message must include the litestream error about the existing output file")
+
+		By("verifying Deployment is scaled back to original replica count after failure")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "deployment", appName, "-n", testNamespace,
+				"-o", "jsonpath={.spec.replicas}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("1"),
+				"operator must scale Deployment back to 1 even when restore fails")
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying originalReplicas was recorded correctly in the restore status")
+		origReplicas, err := kubectlQ("get", "litestreamrestore", restoreName, "-n", testNamespace,
+			"-o", "jsonpath={.status.originalReplicas}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(origReplicas).To(Equal("1"))
+	})
+})
+
+// ── TC-08: Point-in-Time Restore ─────────────────────────────────────────
+//
+// Validates that LitestreamRestore with spec.timestamp restores the DB to the
+// specified point in time rather than the latest snapshot.
+
+var _ = Describe("Point-in-Time Restore", Ordered, func() {
+	const (
+		appName = "pitr-app"
+		dbName  = "pitr-db"
+		pvcName = "pitr-pvc"
+		dbFile  = "pitr.db"
+		dbPath  = "/data"
+		initSQL = "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, val TEXT, ts DATETIME DEFAULT CURRENT_TIMESTAMP);"
+		rowA    = "row-A-before-timestamp"
+		rowB    = "row-B-after-timestamp"
+	)
+
+	var (
+		pitrTimestamp string // RFC 3339 timestamp captured between row A and row B writes
+		pitrPVC       = "pitr-restore-pvc"
+	)
+
+	BeforeAll(func() {
+		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
+
+		By("creating PVC, Deployment, and LitestreamReplica with backup enabled")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=condition=Available", "--timeout=3m")
+		applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+
+		By("waiting for sidecar injection and BackupHealthy=True")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("writing row A")
+		podName := runningPod(appName)
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", dbPath+"/"+dbFile,
+			"INSERT INTO events(val) VALUES('"+rowA+"');")
+
+		By("waiting for row A to replicate and compaction to produce a restorable snapshot")
+		Eventually(func(g Gomega) {
+			out := mcList(minioBucket + "/" + dbName + "/")
+			g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO after row A")
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+		// Wait for L1 compaction (default 30s) so the timestamp falls between
+		// a compacted snapshot and the subsequent row B write.
+		By("waiting 35s for L1 compaction to complete before recording timestamp")
+		time.Sleep(35 * time.Second)
+
+		// Record the PITR timestamp in RFC 3339 UTC after row A is compacted.
+		pitrTimestamp = time.Now().UTC().Format(time.RFC3339)
+		GinkgoWriter.Printf("PITR timestamp: %s\n", pitrTimestamp)
+
+		By("writing row B after the PITR timestamp")
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", dbPath+"/"+dbFile,
+			"INSERT INTO events(val) VALUES('"+rowB+"');")
+
+		By("waiting for row B to replicate to MinIO")
+		Eventually(func(g Gomega) {
+			out := mcList(minioBucket + "/" + dbName + "/")
+			g.Expect(out).NotTo(BeEmpty())
+		}, 2*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("creating restore target PVC")
+		applyLiteral(pvcManifest(pitrPVC, testNamespace))
+	})
+
+	AfterAll(func() {
+		runIgnoreError("kubectl", "delete", "litestreamrestore", "pitr-restore-t1", "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "litestreamrestore", "pitr-restore-latest", "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pitrPVC, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+	})
+
+	It("restores DB to point-in-time T1 (row A present, row B absent)", func() {
+		By("applying LitestreamRestore CR with timestamp=T1")
+		applyLiteral(litestreamRestoreManifestWithTimestamp(
+			"pitr-restore-t1", testNamespace, dbName, pitrPVC, "/restore/"+dbFile, pitrTimestamp))
+
+		By("waiting for restore to complete")
+		Eventually(func(g Gomega) {
+			phase, err := kubectlQ("get", "litestreamrestore", "pitr-restore-t1", "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			if phase == "Failed" {
+				jobName, _ := kubectlQ("get", "litestreamrestore", "pitr-restore-t1", "-n", testNamespace,
+					"-o", "jsonpath={.status.jobName}")
+				if jobName != "" {
+					logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50", "--request-timeout=15s")
+					GinkgoWriter.Printf("\n=== PITR restore job logs ===\n%s\n========================\n", logs)
+				}
+			}
+			g.Expect(phase).To(Equal("Complete"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("running a verification Job against the restored DB")
+		verifyJobT1 := "pitr-verify-t1"
+		applyLiteral(pitrVerifyJobManifest(verifyJobT1, testNamespace, pitrPVC, "/restore/"+dbFile,
+			"SELECT val FROM events WHERE val='"+rowA+"';",
+			"SELECT count(*) FROM events WHERE val='"+rowB+"';",
+		))
+		kubectl("wait", "-n", testNamespace, "job/"+verifyJobT1,
+			"--for=condition=Complete", "--timeout=3m")
+
+		logs := kubectl("logs", "-n", testNamespace, "job/"+verifyJobT1)
+
+		By("verifying row A is present in the PITR-restored DB")
+		Expect(logs).To(ContainSubstring(rowA), "row A should exist at timestamp T1")
+
+		By("verifying row B is NOT present in the PITR-restored DB")
+		Expect(logs).To(ContainSubstring("0"),
+			"row B written after T1 should NOT be present in the PITR-restored DB")
+	})
+
+	It("restores DB to latest snapshot (both row A and row B present)", func() {
+		By("deleting the restored DB file so litestream restore can proceed")
+		// The pitrPVC now has the T1-restored DB; we need to clear it before the latest restore.
+		// First, delete the verification job from the previous It so its completed pod releases
+		// the ReadWriteOnce PVC — otherwise pitr-cleanup will stay Pending.
+		runIgnoreError("kubectl", "delete", "job", "pitr-verify-t1", "-n", testNamespace, "--ignore-not-found")
+		kubectl("run", "pitr-cleanup", "-n", testNamespace, "--image=busybox", "--restart=Never",
+			"--overrides={\"spec\":{\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\""+pitrPVC+"\"}}],\"containers\":[{\"name\":\"busybox\",\"image\":\"busybox\",\"command\":[\"rm\",\"-f\",\"/restore/"+dbFile+"\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/restore\"}]}]}}")
+		// Wait directly for Succeeded — a one-shot pod may complete before Ready is ever set.
+		kubectl("wait", "-n", testNamespace, "pod/pitr-cleanup",
+			"--for=jsonpath={.status.phase}=Succeeded", "--timeout=2m")
+		runIgnoreError("kubectl", "delete", "pod", "pitr-cleanup", "-n", testNamespace, "--ignore-not-found")
+
+		By("applying LitestreamRestore CR without timestamp (latest)")
+		applyLiteral(litestreamRestoreManifest(
+			"pitr-restore-latest", testNamespace, dbName, pitrPVC, "/restore/"+dbFile))
+
+		By("waiting for latest restore to complete")
+		Eventually(func(g Gomega) {
+			phase, err := kubectlQ("get", "litestreamrestore", "pitr-restore-latest", "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(phase).To(Equal("Complete"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("running a verification Job against the latest-restored DB")
+		verifyJobLatest := "pitr-verify-latest"
+		applyLiteral(pitrVerifyJobManifest(verifyJobLatest, testNamespace, pitrPVC, "/restore/"+dbFile,
+			"SELECT val FROM events WHERE val='"+rowA+"';",
+			"SELECT val FROM events WHERE val='"+rowB+"';",
+		))
+		kubectl("wait", "-n", testNamespace, "job/"+verifyJobLatest,
+			"--for=condition=Complete", "--timeout=3m")
+
+		By("verifying both row A and row B are present in the latest-restored DB")
+		latestLogs := kubectl("logs", "-n", testNamespace, "job/"+verifyJobLatest)
+		Expect(latestLogs).To(ContainSubstring(rowA), "row A should exist in latest restore")
+		Expect(latestLogs).To(ContainSubstring(rowB), "row B should exist in latest restore")
+	})
+})
+
 // ── Manifest builders ──────────────────────────────────────────────────────
 
 func pvcManifest(name, ns string) string {
@@ -622,6 +1108,10 @@ spec:
 }
 
 func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string) string {
+	return litestreamReplicaManifestWithOpts(name, ns, target, dbFile, dbPath, backupEnabled, initSQL, false)
+}
+
+func litestreamReplicaManifestWithOpts(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string, autoRestore bool) string {
 	db := &databasev1.LitestreamReplica{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamReplica"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -634,7 +1124,8 @@ func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEn
 	}
 	if backupEnabled {
 		db.Spec.Backup = databasev1.BackupSpec{
-			Enabled: true,
+			Enabled:     true,
+			AutoRestore: autoRestore,
 			Destination: databasev1.BackupDestination{
 				S3: &databasev1.S3Destination{
 					Endpoint:  minioEndpoint,
@@ -653,6 +1144,10 @@ func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEn
 }
 
 func litestreamRestoreManifest(name, ns, sourceRef, pvc, targetPath string) string {
+	return litestreamRestoreManifestWithTimestamp(name, ns, sourceRef, pvc, targetPath, "")
+}
+
+func litestreamRestoreManifestWithTimestamp(name, ns, sourceRef, pvc, targetPath, timestamp string) string {
 	restore := &databasev1.LitestreamRestore{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamRestore"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -660,6 +1155,7 @@ func litestreamRestoreManifest(name, ns, sourceRef, pvc, targetPath string) stri
 			SourceRef:  sourceRef,
 			TargetPVC:  pvc,
 			TargetPath: targetPath,
+			Timestamp:  timestamp,
 		},
 	}
 	data, err := sigsyaml.Marshal(restore)
@@ -698,6 +1194,45 @@ spec:
           persistentVolumeClaim:
             claimName: %s
 `, name, ns, dbPath, pvc)
+}
+
+// pitrVerifyJobManifest creates a Job that runs one or more SQL statements against
+// dbPath via sqlite3 and prints the results to stdout. Use kubectl logs to read
+// the output after the Job completes — exec into a completed pod is not possible.
+func pitrVerifyJobManifest(name, ns, pvc, dbPath string, sqlStatements ...string) string {
+	sql := strings.Join(sqlStatements, " ")
+	return fmt.Sprintf(`
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: verify
+          image: keinos/sqlite3:latest
+          command:
+            - sh
+            - -c
+            - sqlite3 %s "%s"
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /restore
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: %s
+`, name, ns, dbPath, sql, pvc)
 }
 
 // ── Test helpers ───────────────────────────────────────────────────────────

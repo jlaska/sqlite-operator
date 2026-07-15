@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,8 +49,9 @@ const (
 // LitestreamRestoreReconciler reconciles a LitestreamRestore object.
 type LitestreamRestoreReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Scheme     *runtime.Scheme
+	Recorder   record.EventRecorder
+	KubeClient kubernetes.Interface
 }
 
 // +kubebuilder:rbac:groups=litestream.io,resources=litestreamrestores,verbs=get;list;watch;create;update;patch;delete
@@ -58,6 +61,8 @@ type LitestreamRestoreReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 
 func (r *LitestreamRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -269,6 +274,12 @@ func (r *LitestreamRestoreReconciler) reconcileRunning(ctx context.Context, rest
 				if cond.Message != "" {
 					msg = cond.Message
 				}
+				// Fetch the litestream container logs so the user can see the actual
+				// error (e.g. "output file already exists") in status.message rather
+				// than a generic failure description.
+				if podLogs := r.restoreJobPodLogs(ctx, restore.Namespace, restore.Name); podLogs != "" {
+					msg = fmt.Sprintf("%s; litestream output: %s", msg, podLogs)
+				}
 				return ctrl.Result{}, r.failRestoreWithCleanup(ctx, restore, sourceDB, msg)
 			}
 		}
@@ -357,6 +368,12 @@ func (r *LitestreamRestoreReconciler) buildValidationJob(
 		restore.Spec.TargetPath,
 	)
 
+	// Run as root so the validation container can read the restored DB file, which
+	// litestream restore writes as root. Without this, non-root images (e.g.
+	// keinos/sqlite3:latest) fail with a permission error — a false negative.
+	rootUID := int64(0)
+	rootGID := int64(0)
+
 	backoffLimit := int32(1)
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -370,6 +387,10 @@ func (r *LitestreamRestoreReconciler) buildValidationJob(
 				ObjectMeta: metav1.ObjectMeta{Labels: jobLabels},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsUser:  &rootUID,
+						RunAsGroup: &rootGID,
+					},
 					Containers: []corev1.Container{
 						{
 							Name:    "db-integrity-check",
@@ -637,6 +658,39 @@ func s3EnvVars(secretRef string) []corev1.EnvVar {
 }
 
 // failRestore moves the restore to Failed with the given message.
+// restoreJobPodLogs fetches the logs from the most recent pod of a restore Job
+// (tail 30 lines) so the actual litestream error can be surfaced in status.message.
+// Returns an empty string on any error — log retrieval is best-effort.
+// restoreName is the LitestreamRestore CR name, which is also the value of the
+// litestream.io/restore label on Job pods (set in buildRestoreJob via jobLabels).
+func (r *LitestreamRestoreReconciler) restoreJobPodLogs(ctx context.Context, namespace, restoreName string) string {
+	if r.KubeClient == nil {
+		return ""
+	}
+	podList, err := r.KubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: restoreLabelKey + "=" + restoreName,
+	})
+	if err != nil || len(podList.Items) == 0 {
+		return ""
+	}
+	// Use the first (usually only) pod.
+	pod := podList.Items[0]
+	tail := int64(30)
+	req := r.KubeClient.CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		TailLines: &tail,
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = stream.Close() }()
+	b, err := io.ReadAll(stream)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func (r *LitestreamRestoreReconciler) failRestore(ctx context.Context, restore *databasev1.LitestreamRestore, msg string) error {
 	r.Recorder.Event(restore, corev1.EventTypeWarning, "RestoreFailed", msg)
 	now := metav1.Now()

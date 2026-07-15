@@ -300,7 +300,9 @@ fi
 echo "archive-check: database file missing at ${DB_PATH}, probing S3 for backup data..."
 PROBE="${DB_PATH}.archive-check-probe"
 rm -f "${PROBE}"
-if litestream restore -config /etc/litestream/litestream.yml -o "${PROBE}" "${DB_PATH}" 2>/dev/null; then
+RESTORE_OUTPUT=$(litestream restore -config /etc/litestream/litestream.yml -o "${PROBE}" "${DB_PATH}" 2>&1)
+RESTORE_EXIT=$?
+if [ ${RESTORE_EXIT} -eq 0 ]; then
   rm -f "${PROBE}"
   echo "archive-check FAILED: S3 has existing backup data but local database is missing."
   echo "This likely means data was lost (PVC wiped or DB deleted)."
@@ -309,6 +311,8 @@ if litestream restore -config /etc/litestream/litestream.yml -o "${PROBE}" "${DB
   exit 1
 fi
 rm -f "${PROBE}"
+echo "archive-check: litestream restore exited ${RESTORE_EXIT} (no restorable backup found)"
+echo "archive-check: litestream output: ${RESTORE_OUTPUT}"
 echo "archive-check: no S3 backup found, safe to proceed (first-time setup)"
 exit 0
 `, dbFullPath)

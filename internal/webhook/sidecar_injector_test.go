@@ -724,6 +724,12 @@ var _ = Describe("SidecarInjector archive check", func() {
 		}
 		script := strings.Join(archiveCheck.Command, " ")
 		Expect(script).To(ContainSubstring(acDatabasePath + "/" + acDatabaseName))
+		// Litestream errors must not be suppressed — surfacing them is essential for
+		// diagnosing why the probe reports "no backup" on a non-empty S3 bucket.
+		Expect(script).NotTo(ContainSubstring("2>/dev/null"),
+			"archive-check must not suppress litestream stderr")
+		Expect(script).To(ContainSubstring("2>&1"),
+			"archive-check must capture litestream output for logging")
 	})
 
 	It("does not inject archive-check when backup is disabled", func() {
