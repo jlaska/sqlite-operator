@@ -2,8 +2,8 @@ apiVersion: v2
 name: litestream-operator
 description: A Kubernetes operator that injects Litestream sidecars into application pods for continuous SQLite backup
 type: application
-version: 0.4.1
-appVersion: "0.4.1"
+version: 0.4.2
+appVersion: "0.4.2"
 keywords:
   - sqlite
   - litestream
