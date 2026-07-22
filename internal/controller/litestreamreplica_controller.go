@@ -468,6 +468,17 @@ func (r *LitestreamReplicaReconciler) updateStatus(ctx context.Context, db *data
 		} else if !healthy && prevHealthy {
 			r.Recorder.Event(db, corev1.EventTypeWarning, "BackupUnhealthy", msg)
 		}
+
+		// When the sidecar is healthy, litestream has started replicating and created
+		// the state directory (.<dbname>-litestream/). Clear any skip-archive-check
+		// annotation that was set by the restore controller after a LitestreamRestore so
+		// that the safety guard is active again on future pod restarts.
+		if healthy && db.Annotations[skipArchiveAnnotation] == injectEnabled {
+			if err := r.clearSkipArchiveCheck(ctx, db); err != nil {
+				// Non-fatal: log and continue. The annotation will be cleared on the next reconcile.
+				logf.FromContext(ctx).Error(err, "failed to clear skip-archive-check annotation; will retry")
+			}
+		}
 	} else {
 		db.Status.BackupHealthy = false
 		setCondition(&db.Status.Conditions, databasev1.ConditionBackupHealthy,
@@ -539,6 +550,21 @@ func (r *LitestreamReplicaReconciler) archiveCheckState(ctx context.Context, db 
 		}
 	}
 	return false, "archive check passed"
+}
+
+// clearSkipArchiveCheck removes the skip-archive-check annotation from the LitestreamReplica.
+// It re-fetches the object to avoid version conflicts before patching.
+func (r *LitestreamReplicaReconciler) clearSkipArchiveCheck(ctx context.Context, db *databasev1.LitestreamReplica) error {
+	latest := &databasev1.LitestreamReplica{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: db.Namespace, Name: db.Name}, latest); err != nil {
+		return err
+	}
+	if latest.Annotations[skipArchiveAnnotation] != injectEnabled {
+		return nil // already absent
+	}
+	patch := client.MergeFrom(latest.DeepCopy())
+	delete(latest.Annotations, skipArchiveAnnotation)
+	return r.Patch(ctx, latest, patch)
 }
 
 // setCondition is a thin wrapper around meta.SetStatusCondition that fills in

@@ -573,6 +573,174 @@ var _ = Describe("Archive Check — Data Loss Recovery", Ordered, func() {
 	})
 })
 
+// ── Issue #109: Archive Check — Fresh DB Divergence ─────────────────────
+//
+// When a pod starts with a fresh/empty local database (DB file exists but
+// the litestream state directory is absent) while S3 already has backup data,
+// the archive-check init container must block startup to prevent the sidecar
+// from overwriting the S3 backup chain with the empty DB.
+//
+// After a LitestreamRestore, the restored DB exists but the state dir does not
+// yet (it is created by litestream replicate, not by litestream restore). The
+// restore controller sets skip-archive-check=true before scaling up so the pod
+// can start; the LitestreamReplica controller auto-clears it once healthy.
+
+var _ = Describe("Archive Check — Fresh DB Divergence", Ordered, func() {
+	const (
+		appName   = "diverge-check-app"
+		dbName    = "diverge-check-db"
+		pvcName   = "diverge-check-pvc"
+		dbFile    = "diverge.db"
+		dbPath    = "/data"
+		initSQL   = "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT);"
+		itemValue = "diverge-check-test-item"
+	)
+
+	BeforeAll(func() {
+		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
+
+		By("creating PVC, Deployment, and LitestreamReplica CR with backup enabled and initSQL")
+		applyLiteral(pvcManifest(pvcName, testNamespace))
+		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
+		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
+			"--for=condition=Available", "--timeout=3m")
+		applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+
+		By("waiting for sidecar injection and BackupHealthy=True")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("writing test data to the database")
+		podName := runningPod(appName)
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", dbPath+"/"+dbFile,
+			"INSERT INTO items(name) VALUES('"+itemValue+"');")
+
+		By("waiting for Litestream to replicate the row to MinIO")
+		Eventually(func(g Gomega) {
+			out := mcList(minioBucket + "/" + dbName + "/")
+			if out == "" {
+				all, _ := kubectlQ("exec", "-n", testNamespace, "mc-client", "--",
+					"/bin/sh", "-c", "mc ls --recursive local/"+minioBucket+"/")
+				g.Expect(out).NotTo(BeEmpty(),
+					"expected backup objects at %s/%s/ — full bucket contents:\n%s",
+					minioBucket, dbName, all)
+			} else {
+				g.Expect(out).NotTo(BeEmpty(), "expected backup objects in MinIO bucket")
+			}
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+	})
+
+	AfterAll(func() {
+		runIgnoreError("kubectl", "delete", "litestreamrestore", "diverge-check-restore", "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "litestreamreplica", dbName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "deployment", appName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+		runIgnoreError("kubectl", "delete", "pvc", pvcName, "-n", testNamespace, "--ignore-not-found", "--wait=false")
+	})
+
+	It("archive-check blocks startup when DB exists but litestream state dir is absent and S3 has data", func() {
+		podName := runningPod(appName)
+
+		By("deleting the litestream state directory and replacing the DB with a fresh empty one")
+		// Remove the state dir — simulates a DB that was created without ever being replicated.
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "rm", "-rf", dbPath+"/."+dbFile+"-litestream")
+		// Replace the existing DB with a fresh empty one (different schema).
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "rm", "-f", dbPath+"/"+dbFile)
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sqlite3", dbPath+"/"+dbFile, "CREATE TABLE placeholder(x);")
+		// Remove db-init markers so the init container doesn't interfere.
+		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+			"--", "sh", "-c", "rm -f "+dbPath+"/.db-init-*")
+
+		By("scaling Deployment to 0 and back to 1 to force pod restart")
+		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=0")
+		kubectl("rollout", "status", "deployment/"+appName, "-n", testNamespace, "--timeout=2m")
+		kubectl("scale", "deployment", appName, "-n", testNamespace, "--replicas=1")
+
+		By("waiting for archive-check init container to fail (pod blocked)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"-o", `jsonpath={range .items[*]}{range .status.initContainerStatuses[*]}{.name}={.state.terminated.exitCode}{"\n"}{end}{end}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring("litestream-archive-check=1"),
+				"expected archive-check to exit 1: DB exists but state dir absent with S3 backup present")
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying ArchiveCheckFailed condition on LitestreamReplica")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="ArchiveCheckFailed")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}).Should(Succeed())
+	})
+
+	It("LitestreamRestore recovers data and pod restarts without archive-check false-positive", func() {
+		By("creating a LitestreamRestore CR targeting the same PVC")
+		applyLiteral(litestreamRestoreManifest("diverge-check-restore", testNamespace, dbName, pvcName, dbPath+"/"+dbFile))
+
+		By("waiting for restore to reach Complete phase")
+		Eventually(func(g Gomega) {
+			phase, err := kubectlQ("get", "litestreamrestore", "diverge-check-restore", "-n", testNamespace,
+				"-o", "jsonpath={.status.phase}")
+			g.Expect(err).NotTo(HaveOccurred())
+			if phase == "Failed" {
+				jobName, _ := kubectlQ("get", "litestreamrestore", "diverge-check-restore", "-n", testNamespace,
+					"-o", "jsonpath={.status.jobName}")
+				if jobName != "" {
+					logs, _ := kubectlQ("logs", "-n", testNamespace, "job/"+jobName, "--tail=50", "--request-timeout=15s")
+					GinkgoWriter.Printf("\n=== restore Job logs ===\n%s\n========================\n", logs)
+				}
+			}
+			g.Expect(phase).To(Equal("Complete"))
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("waiting for the pod to restart successfully after restore (skip-archive-check set by restore controller)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "pods", "-n", testNamespace,
+				"-l", "app="+appName,
+				"--field-selector=status.phase=Running",
+				"-o", "jsonpath={.items[0].metadata.name}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).NotTo(BeEmpty())
+		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying restored data is present in the database")
+		restoredPod := runningPod(appName)
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("exec", "-n", testNamespace, restoredPod, "-c", "app",
+				"--", "sqlite3", dbPath+"/"+dbFile,
+				"SELECT name FROM items WHERE name='"+itemValue+"';")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(ContainSubstring(itemValue))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("verifying BackupHealthy=True after restore (Litestream resumed and state dir created)")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="BackupHealthy")].status}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("True"))
+		}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("verifying skip-archive-check annotation was auto-cleared by the replica controller")
+		Eventually(func(g Gomega) {
+			out, err := kubectlQ("get", "litestreamreplica", dbName, "-n", testNamespace,
+				"-o", `jsonpath={.metadata.annotations.litestream\.io/skip-archive-check}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).NotTo(Equal("true"),
+				"skip-archive-check annotation must be cleared once litestream sidecar is healthy")
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+	})
+})
+
 // ── TC-01: First-Time Setup ───────────────────────────────────────────────
 //
 // When no DB file and no S3 backup exist, the archive-check init container
