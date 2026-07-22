@@ -614,6 +614,10 @@ var _ = Describe("Archive Check — Fresh DB Divergence", Ordered, func() {
 			g.Expect(out).To(Equal("True"))
 		}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
+		// Wait for the rolling update (triggered by sidecar injection) to finish so the
+		// old pre-injection pod is gone and only the sidecar-bearing pod remains running.
+		kubectl("rollout", "status", "deployment/"+appName, "-n", testNamespace, "--timeout=3m")
+
 		By("writing test data to the database")
 		podName := runningPod(appName)
 		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
@@ -643,11 +647,15 @@ var _ = Describe("Archive Check — Fresh DB Divergence", Ordered, func() {
 	})
 
 	It("archive-check blocks startup when DB exists but litestream state dir is absent and S3 has data", func() {
-		podName := runningPod(appName)
+		// The state dir is owned by the litestream sidecar; use a helper that waits for a
+		// Running pod with that container (the old pre-injection pod may still be Running
+		// while the new sidecar-bearing pod comes up during the rolling update).
+		podName := runningPodWithSidecar(appName)
 
 		By("deleting the litestream state directory and replacing the DB with a fresh empty one")
 		// Remove the state dir — simulates a DB that was created without ever being replicated.
-		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
+		// Use the litestream container: the state dir is owned by it, not the app container.
+		kubectl("exec", "-n", testNamespace, podName, "-c", "litestream",
 			"--", "rm", "-rf", dbPath+"/."+dbFile+"-litestream")
 		// Replace the existing DB with a fresh empty one (different schema).
 		kubectl("exec", "-n", testNamespace, podName, "-c", "app",
@@ -1416,6 +1424,33 @@ func runningPod(deploymentName string) string {
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(out).NotTo(BeEmpty())
 		podName = strings.TrimSpace(out)
+	}, 2*time.Minute, 5*time.Second).Should(Succeed())
+	return podName
+}
+
+// runningPodWithSidecar returns the name of a Running pod for the given Deployment
+// that has the litestream sidecar container present. During a rolling update both
+// the old pod (no sidecar) and the new pod (with sidecar) may be Running
+// simultaneously; this helper ensures we get the sidecar-bearing one.
+func runningPodWithSidecar(deploymentName string) string {
+	var podName string
+	Eventually(func(g Gomega) {
+		out, err := kubectlQ("get", "pods", "-n", testNamespace,
+			"-l", "app="+deploymentName,
+			"--field-selector=status.phase=Running",
+			"-o", `jsonpath={range .items[*]}{.metadata.name}{"="}{range .status.containerStatuses[*]}{.name}{","}{end}{"\n"}{end}`)
+		g.Expect(err).NotTo(HaveOccurred())
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 && strings.Contains(parts[1], "litestream") {
+				podName = parts[0]
+				return
+			}
+		}
+		Fail("no running pod with litestream sidecar found")
 	}, 2*time.Minute, 5*time.Second).Should(Succeed())
 	return podName
 }
