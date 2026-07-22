@@ -284,13 +284,23 @@ func (s *SidecarInjector) injectArchiveCheckContainer(pod *corev1.Pod, db *datab
 
 	// Shell script logic:
 	//   1. If the DB file exists → pass (normal restart or first-time setup with pre-existing DB).
-	//   2. If DB is missing AND S3 has restorable data → fail with actionable message.
-	//   3. If DB is missing AND S3 is empty → pass (first-time setup).
+	//   2. If DB is missing AND litestream restore exits non-zero → real error (broken chain,
+	//      credentials, network, config). Block startup and surface the error output.
+	//   3. If DB is missing AND litestream restore exits 0 AND probe file exists → S3 had
+	//      restorable data (data loss detected). Block startup with recovery instructions.
+	//   4. If DB is missing AND litestream restore exits 0 AND no probe file → S3 is empty
+	//      (first-time setup). Allow fresh start.
+	//
+	// Uses `litestream restore -if-replica-exists` per the upstream idempotent deployment
+	// pattern (https://litestream.io/reference/restore/#idempotent-deployment-script).
+	// With this flag, litestream exits 0 only for: successful restore OR no backups found
+	// (ErrTxNotAvailable). All other errors — broken LTX chain, credentials, network, config,
+	// corruption — still exit 1. We distinguish "restored" from "no backups" by checking
+	// whether the probe file was created.
 	//
 	// Uses `litestream restore` as the S3 probe instead of `litestream snapshots`
 	// because in v0.5.x `snapshots` is an IPC command that requires a running daemon;
 	// it always returns empty when invoked standalone in a one-off init container.
-	// `litestream restore` works standalone and exits 0 only when restorable data exists.
 	script := fmt.Sprintf(`
 DB_PATH="%s"
 if [ -f "${DB_PATH}" ]; then
@@ -300,9 +310,18 @@ fi
 echo "archive-check: database file missing at ${DB_PATH}, probing S3 for backup data..."
 PROBE="${DB_PATH}.archive-check-probe"
 rm -f "${PROBE}"
-RESTORE_OUTPUT=$(litestream restore -config /etc/litestream/litestream.yml -o "${PROBE}" "${DB_PATH}" 2>&1)
+RESTORE_OUTPUT=$(litestream restore -if-replica-exists -config /etc/litestream/litestream.yml -o "${PROBE}" "${DB_PATH}" 2>&1)
 RESTORE_EXIT=$?
-if [ ${RESTORE_EXIT} -eq 0 ]; then
+if [ ${RESTORE_EXIT} -ne 0 ]; then
+  rm -f "${PROBE}"
+  echo "archive-check FAILED: litestream restore encountered an error."
+  echo "archive-check: litestream output: ${RESTORE_OUTPUT}"
+  echo "archive-check: Examine the litestream output above for details."
+  echo "archive-check: To recover: create a LitestreamRestore CR (optionally with -timestamp for an earlier point)."
+  echo "archive-check: To bypass (start fresh): set annotation litestream.io/skip-archive-check=true"
+  exit 1
+fi
+if [ -f "${PROBE}" ]; then
   rm -f "${PROBE}"
   echo "archive-check FAILED: S3 has existing backup data but local database is missing."
   echo "This likely means data was lost (PVC wiped or DB deleted)."
@@ -310,9 +329,6 @@ if [ ${RESTORE_EXIT} -eq 0 ]; then
   echo "To bypass (start fresh): set annotation litestream.io/skip-archive-check=true"
   exit 1
 fi
-rm -f "${PROBE}"
-echo "archive-check: litestream restore exited ${RESTORE_EXIT} (no restorable backup found)"
-echo "archive-check: litestream output: ${RESTORE_OUTPUT}"
 echo "archive-check: no S3 backup found, safe to proceed (first-time setup)"
 exit 0
 `, dbFullPath)

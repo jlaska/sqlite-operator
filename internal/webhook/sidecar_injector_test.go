@@ -724,12 +724,45 @@ var _ = Describe("SidecarInjector archive check", func() {
 		}
 		script := strings.Join(archiveCheck.Command, " ")
 		Expect(script).To(ContainSubstring(acDatabasePath + "/" + acDatabaseName))
+		// -if-replica-exists makes litestream exit 0 for "no backups found" while still
+		// exiting 1 for real errors (broken chain, credentials, network, corruption).
+		Expect(script).To(ContainSubstring("-if-replica-exists"),
+			"archive-check must use -if-replica-exists to distinguish empty bucket from errors")
+		// Probe file existence distinguishes "restored" (file present) from "no data" (absent).
+		Expect(script).To(ContainSubstring(`-f "${PROBE}"`),
+			"archive-check must check probe file existence after a successful restore")
 		// Litestream errors must not be suppressed — surfacing them is essential for
-		// diagnosing why the probe reports "no backup" on a non-empty S3 bucket.
+		// diagnosing why archive-check blocks startup.
 		Expect(script).NotTo(ContainSubstring("2>/dev/null"),
 			"archive-check must not suppress litestream stderr")
 		Expect(script).To(ContainSubstring("2>&1"),
 			"archive-check must capture litestream output for logging")
+	})
+
+	It("archive-check script blocks startup on non-zero litestream exit", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		script := strings.Join(archiveCheck.Command, " ")
+		// Non-zero exit from litestream restore must block startup and surface the error output.
+		Expect(script).To(ContainSubstring("RESTORE_EXIT} -ne 0"),
+			"archive-check must exit 1 on any non-zero litestream restore exit")
+		Expect(script).To(ContainSubstring("${RESTORE_OUTPUT}"),
+			"archive-check must surface the litestream error output on failure")
 	})
 
 	It("does not inject archive-check when backup is disabled", func() {
