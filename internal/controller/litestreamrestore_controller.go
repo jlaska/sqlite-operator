@@ -438,6 +438,17 @@ func (r *LitestreamRestoreReconciler) reconcileScalingUp(ctx context.Context, re
 		}
 	}
 
+	// Set skip-archive-check before removing the pause annotation so that when new pods
+	// start, archive-check does not false-positive on the restored DB. The restored database
+	// file exists on the PVC, but the litestream state directory (.<dbname>-litestream/)
+	// does not — it is only created by litestream replicate on first run. Without this flag,
+	// the enhanced archive-check (which now gates on the state dir) would probe S3, find
+	// backup data, and block pod startup. The LitestreamReplica controller clears this
+	// annotation automatically once the sidecar is confirmed healthy.
+	if err := r.setSkipArchiveCheck(ctx, sourceDB, true); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting skip-archive-check on LitestreamReplica: %w", err)
+	}
+
 	if err := r.resumeReplication(ctx, sourceDB); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing pause annotation from LitestreamReplica: %w", err)
 	}
@@ -508,6 +519,35 @@ func (r *LitestreamRestoreReconciler) resumeReplication(ctx context.Context, db 
 	return r.Patch(ctx, latest, patch)
 }
 
+// setSkipArchiveCheck sets or removes the skip-archive-check annotation on a LitestreamReplica.
+// When enable=true the annotation is set; when false it is removed. The caller must re-fetch
+// the resource before patching to avoid update conflicts.
+func (r *LitestreamRestoreReconciler) setSkipArchiveCheck(ctx context.Context, db *databasev1.LitestreamReplica, enable bool) error {
+	latest := &databasev1.LitestreamReplica{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: db.Namespace, Name: db.Name}, latest); err != nil {
+		return err
+	}
+	if enable {
+		if latest.Annotations[databasev1.AnnotationSkipArchiveCheck] == injectEnabled {
+			return nil // already set
+		}
+	} else {
+		if latest.Annotations[databasev1.AnnotationSkipArchiveCheck] != injectEnabled {
+			return nil // already absent
+		}
+	}
+	patch := client.MergeFrom(latest.DeepCopy())
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	if enable {
+		latest.Annotations[databasev1.AnnotationSkipArchiveCheck] = injectEnabled
+	} else {
+		delete(latest.Annotations, databasev1.AnnotationSkipArchiveCheck)
+	}
+	return r.Patch(ctx, latest, patch)
+}
+
 // buildRestoreJob constructs the Job that runs `litestream restore`.
 func (r *LitestreamRestoreReconciler) buildRestoreJob(
 	restore *databasev1.LitestreamRestore,
@@ -538,9 +578,9 @@ func (r *LitestreamRestoreReconciler) buildRestoreJob(
 		"restore",
 		"-config", "/etc/litestream/litestream.yml",
 		"-o", restore.Spec.TargetPath,
-		// Note: Litestream 0.5.x does not have a -force flag. If a partial output
-		// file exists from a previous failed attempt, Litestream overwrites it
-		// because it constructs the output from LTX snapshots from scratch.
+	}
+	if restore.Spec.Force {
+		args = append(args, "-force")
 	}
 	if restore.Spec.Timestamp != "" {
 		args = append(args, "-timestamp", restore.Spec.Timestamp)

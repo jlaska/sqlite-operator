@@ -862,6 +862,93 @@ var _ = Describe("SidecarInjector archive check", func() {
 			Expect(c.Name).NotTo(Equal("litestream-restore"))
 		}
 	})
+
+	It("archive-check script exits 0 only when both DB file and state dir exist", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		script := strings.Join(archiveCheck.Command, " ")
+		// The script must check for the state directory alongside the DB file.
+		// Both must exist for an early exit — a DB without the state dir falls through
+		// to the S3 probe to catch fresh/recreated databases (issue #109).
+		Expect(script).To(ContainSubstring(`-d "${STATE_DIR}"`),
+			"archive-check must test for state directory existence")
+		Expect(script).To(ContainSubstring("STATE_DIR="),
+			"archive-check must define STATE_DIR variable")
+		// Early exit only when both DB and state dir exist.
+		Expect(script).To(ContainSubstring("skipping check"),
+			"archive-check must exit 0 when both DB and state dir are present")
+	})
+
+	It("archive-check script uses the correct state directory path convention", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		script := strings.Join(archiveCheck.Command, " ")
+		// Litestream state dir is .<dbfilename>-litestream (MetaDirSuffix = "-litestream").
+		// Documented at https://litestream.io/tips/#deleting-sqlite-databases
+		expectedStateDir := acDatabasePath + "/." + acDatabaseName + "-litestream"
+		Expect(script).To(ContainSubstring(expectedStateDir),
+			"archive-check state directory must use .<dbname>-litestream naming convention")
+	})
+
+	It("archive-check script probes S3 when DB exists but state dir is absent", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil))).To(Succeed())
+
+		annotations := map[string]string{
+			databasev1.AnnotationInject: injectTrue,
+			databasev1.AnnotationConfig: namespace + "/" + acDBName,
+		}
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		script := strings.Join(archiveCheck.Command, " ")
+		// When DB exists but state dir is absent, the script must NOT exit 0.
+		// It must continue to the S3 probe (litestream restore).
+		// Verify this by checking: (a) state dir test is present, (b) S3 probe follows.
+		Expect(script).To(ContainSubstring(`-d "${STATE_DIR}"`),
+			"archive-check must test for state directory")
+		Expect(script).To(ContainSubstring("probing S3"),
+			"archive-check must continue to S3 probe when state dir is absent")
+		Expect(script).To(ContainSubstring("litestream restore"),
+			"archive-check must invoke litestream restore as the S3 probe")
+	})
 })
 
 var _ = Describe("SidecarInjector auto-restore", func() {

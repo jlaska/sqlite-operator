@@ -357,14 +357,15 @@ var _ = Describe("LitestreamRestoreReconciler error injection", func() {
 		restore := newFakeRestore(restoreName, ns, srcDBName, databasev1.RestorePhaseScalingUp)
 		restore.Status.OriginalReplicas = &zero
 
-		// Allow the first LitestreamReplica Get (Reconcile's sourceDB lookup) to succeed.
-		// The second Get (resumeReplication's re-fetch) must fail.
+		// Allow the first LitestreamReplica Get (Reconcile's sourceDB lookup) and the
+		// second Get (setSkipArchiveCheck's re-fetch) to succeed.
+		// The third Get (resumeReplication's re-fetch) must fail.
 		dbGetCount := 0
 		r := buildFakeRestoreClient([]client.Object{db, restore}, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 				if _, ok := o.(*databasev1.LitestreamReplica); ok {
 					dbGetCount++
-					if dbGetCount > 1 {
+					if dbGetCount > 2 {
 						return fmt.Errorf("transient re-fetch error")
 					}
 				}

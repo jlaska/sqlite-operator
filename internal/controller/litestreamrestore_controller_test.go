@@ -799,6 +799,29 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		Expect(db.Annotations[databasev1.AnnotationPause]).NotTo(Equal("true"))
 	})
 
+	It("sets skip-archive-check annotation on LitestreamReplica after successful restore", func() {
+		dbKey, restoreKey, deployKey := newStateMachineResources("skip-archive-check-set", 1)
+		defer cleanupResources(dbKey, restoreKey, deployKey)
+
+		reconciler := newReconciler()
+		driveToValidating(ctx, reconciler, dbKey, restoreKey, deployKey)
+		simulateValidationSuccess(ctx, restoreKey)
+
+		// Validating → ScalingUp → Complete.
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		// skip-archive-check must be set on the LitestreamReplica so that the
+		// restored DB (which has no litestream state directory yet) doesn't trigger
+		// a false-positive archive-check block on the next pod startup (issue #109).
+		db := &databasev1.LitestreamReplica{}
+		Expect(k8sClient.Get(ctx, dbKey, db)).To(Succeed())
+		Expect(db.Annotations[databasev1.AnnotationSkipArchiveCheck]).To(Equal("true"),
+			"restore controller must set skip-archive-check to prevent false-positive archive-check on next pod start")
+	})
+
 	It("cleans up on Job failure: scales back up and removes pause annotation", func() {
 		dbKey, restoreKey, deployKey := newStateMachineResources("fail-cleanup", 1)
 		defer cleanupResources(dbKey, restoreKey, deployKey)
