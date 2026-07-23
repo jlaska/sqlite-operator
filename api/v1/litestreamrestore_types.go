@@ -61,6 +61,13 @@ type LitestreamRestoreSpec struct {
 	// Defaults to the image specified in the referenced LitestreamReplica, or
 	// litestream/litestream:0.5.14 if neither is set.
 	Image string `json:"image,omitempty"`
+
+	// Force causes the restore Job to pass -force to litestream, overwriting an
+	// existing database file at TargetPath. By default, litestream refuses to
+	// overwrite a non-empty file. Set this to true only when you intentionally
+	// want to replace an existing database (e.g. recovering from a diverged DB).
+	// +optional
+	Force bool `json:"force,omitempty"`
 }
 
 // LitestreamRestoreStatus defines the observed state of a LitestreamRestore operation.

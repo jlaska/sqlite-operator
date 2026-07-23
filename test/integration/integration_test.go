@@ -692,7 +692,11 @@ var _ = Describe("Archive Check — Fresh DB Divergence", Ordered, func() {
 
 	It("LitestreamRestore recovers data and pod restarts without archive-check false-positive", func() {
 		By("creating a LitestreamRestore CR targeting the same PVC")
-		applyLiteral(litestreamRestoreManifest("diverge-check-restore", testNamespace, dbName, pvcName, dbPath+"/"+dbFile))
+		// force=true is required here: the previous test left a placeholder DB at the target
+		// path to simulate divergence. Without -force, litestream refuses to overwrite a
+		// non-empty file. The deployment is scaled to 0 by the restore controller before
+		// the Job runs, so overwriting is safe.
+		applyLiteral(litestreamRestoreManifestWithForce("diverge-check-restore", testNamespace, dbName, pvcName, dbPath+"/"+dbFile))
 
 		By("waiting for restore to reach Complete phase")
 		Eventually(func(g Gomega) {
@@ -1321,6 +1325,22 @@ func litestreamReplicaManifestWithOpts(name, ns, target, dbFile, dbPath string, 
 
 func litestreamRestoreManifest(name, ns, sourceRef, pvc, targetPath string) string {
 	return litestreamRestoreManifestWithTimestamp(name, ns, sourceRef, pvc, targetPath, "")
+}
+
+func litestreamRestoreManifestWithForce(name, ns, sourceRef, pvc, targetPath string) string {
+	restore := &databasev1.LitestreamRestore{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamRestore"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: databasev1.LitestreamRestoreSpec{
+			SourceRef:  sourceRef,
+			TargetPVC:  pvc,
+			TargetPath: targetPath,
+			Force:      true,
+		},
+	}
+	data, err := sigsyaml.Marshal(restore)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return string(data)
 }
 
 func litestreamRestoreManifestWithTimestamp(name, ns, sourceRef, pvc, targetPath, timestamp string) string {

@@ -578,9 +578,9 @@ func (r *LitestreamRestoreReconciler) buildRestoreJob(
 		"restore",
 		"-config", "/etc/litestream/litestream.yml",
 		"-o", restore.Spec.TargetPath,
-		// Note: Litestream 0.5.x does not have a -force flag. If a partial output
-		// file exists from a previous failed attempt, Litestream overwrites it
-		// because it constructs the output from LTX snapshots from scratch.
+	}
+	if restore.Spec.Force {
+		args = append(args, "-force")
 	}
 	if restore.Spec.Timestamp != "" {
 		args = append(args, "-timestamp", restore.Spec.Timestamp)
