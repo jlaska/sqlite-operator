@@ -1462,6 +1462,87 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		_ = dbKey
 		_ = deployKey
 	})
+
+	// buildRestoreJob / buildValidationJob — SecurityContext from spec.runAsUser/runAsGroup.
+	Context("SecurityContext from spec.runAsUser / spec.runAsGroup", func() {
+		var (
+			reconciler *LitestreamRestoreReconciler
+			sourceDB   *databasev1.LitestreamReplica
+			restore    *databasev1.LitestreamRestore
+		)
+
+		BeforeEach(func() {
+			reconciler = &LitestreamRestoreReconciler{Client: k8sClient}
+			sourceDB = &databasev1.LitestreamReplica{
+				Spec: databasev1.LitestreamReplicaSpec{
+					DatabaseName: "app.db",
+					DatabasePath: "/data",
+					Backup: databasev1.BackupSpec{
+						Enabled: true,
+						Destination: databasev1.BackupDestination{
+							S3: &databasev1.S3Destination{
+								Bucket:    "bucket",
+								SecretRef: "secret",
+							},
+						},
+					},
+				},
+			}
+			restore = &databasev1.LitestreamRestore{
+				ObjectMeta: metav1.ObjectMeta{Name: "sec-ctx-test", Namespace: namespaceName},
+				Spec: databasev1.LitestreamRestoreSpec{
+					SourceRef:  sourceDB.Name,
+					TargetPVC:  "test-pvc",
+					TargetPath: "/data/app.db",
+				},
+			}
+		})
+
+		It("buildRestoreJob has no SecurityContext when RunAsUser/RunAsGroup omitted", func() {
+			job := reconciler.buildRestoreJob(restore, sourceDB, "restore-job")
+			Expect(job.Spec.Template.Spec.SecurityContext).To(BeNil())
+		})
+
+		It("buildRestoreJob sets PodSecurityContext when RunAsUser is set", func() {
+			uid := int64(1000)
+			restore.Spec.RunAsUser = &uid
+			job := reconciler.buildRestoreJob(restore, sourceDB, "restore-job")
+			Expect(job.Spec.Template.Spec.SecurityContext).NotTo(BeNil())
+			Expect(job.Spec.Template.Spec.SecurityContext.RunAsUser).NotTo(BeNil())
+			Expect(*job.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(job.Spec.Template.Spec.SecurityContext.RunAsGroup).To(BeNil())
+		})
+
+		It("buildRestoreJob sets both RunAsUser and RunAsGroup when both specified", func() {
+			uid, gid := int64(1000), int64(2000)
+			restore.Spec.RunAsUser = &uid
+			restore.Spec.RunAsGroup = &gid
+			job := reconciler.buildRestoreJob(restore, sourceDB, "restore-job")
+			secCtx := job.Spec.Template.Spec.SecurityContext
+			Expect(secCtx).NotTo(BeNil())
+			Expect(*secCtx.RunAsUser).To(Equal(int64(1000)))
+			Expect(*secCtx.RunAsGroup).To(Equal(int64(2000)))
+		})
+
+		It("buildValidationJob defaults to root SecurityContext when RunAsUser/RunAsGroup omitted", func() {
+			job := reconciler.buildValidationJob(restore, sourceDB, "validate-job")
+			secCtx := job.Spec.Template.Spec.SecurityContext
+			Expect(secCtx).NotTo(BeNil())
+			Expect(*secCtx.RunAsUser).To(Equal(int64(0)))
+			Expect(*secCtx.RunAsGroup).To(Equal(int64(0)))
+		})
+
+		It("buildValidationJob uses restore's RunAsUser/RunAsGroup when set", func() {
+			uid, gid := int64(1000), int64(1000)
+			restore.Spec.RunAsUser = &uid
+			restore.Spec.RunAsGroup = &gid
+			job := reconciler.buildValidationJob(restore, sourceDB, "validate-job")
+			secCtx := job.Spec.Template.Spec.SecurityContext
+			Expect(secCtx).NotTo(BeNil())
+			Expect(*secCtx.RunAsUser).To(Equal(int64(1000)))
+			Expect(*secCtx.RunAsGroup).To(Equal(int64(1000)))
+		})
+	})
 })
 
 // driveToRunning drives a restore through Pending → Pausing → ScalingDown → Running

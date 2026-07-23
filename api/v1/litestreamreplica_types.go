@@ -139,6 +139,18 @@ type LitestreamReplicaSpec struct {
 	// applies InitSQL. Must include the sqlite3 CLI.
 	// +kubebuilder:default="keinos/sqlite3:latest"
 	InitImage string `json:"initImage,omitempty"`
+
+	// RunAsUser sets the UID for Litestream-managed init containers injected by the
+	// webhook (archive-check, auto-restore, db-init). When set, restored database files
+	// are owned by this UID, allowing non-root application containers to read them.
+	// When omitted, the container image's default user (root for litestream) is used.
+	// +optional
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
+	// RunAsGroup sets the GID for Litestream-managed init containers injected by the webhook.
+	// When omitted, the container image's default group is used.
+	// +optional
+	RunAsGroup *int64 `json:"runAsGroup,omitempty"`
 }
 
 // Annotation keys placed on a Deployment's pod template by the controller.

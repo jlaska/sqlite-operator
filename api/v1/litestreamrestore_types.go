@@ -61,6 +61,19 @@ type LitestreamRestoreSpec struct {
 	// Defaults to the image specified in the referenced LitestreamReplica, or
 	// litestream/litestream:0.5.14 if neither is set.
 	Image string `json:"image,omitempty"`
+
+	// RunAsUser sets the UID for both the restore Job and the validation Job pods.
+	// When omitted, the container image's default user is used (root for the standard
+	// litestream image). Set this to match your application's UID (e.g. 1000) so that
+	// the restored file is readable by non-root containers and to satisfy PSA Restricted
+	// namespaces which reject runAsUser: 0.
+	// +optional
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
+	// RunAsGroup sets the GID for both the restore Job and the validation Job pods.
+	// When omitted, the container image's default group is used.
+	// +optional
+	RunAsGroup *int64 `json:"runAsGroup,omitempty"`
 }
 
 // LitestreamRestoreStatus defines the observed state of a LitestreamRestore operation.

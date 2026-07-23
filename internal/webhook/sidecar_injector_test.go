@@ -1194,6 +1194,168 @@ var _ = Describe("SidecarInjector error paths", func() {
 	})
 })
 
+var _ = Describe("SidecarInjector SecurityContext from runAsUser/runAsGroup", func() {
+	const (
+		namespace         = "default"
+		scDBName          = "sc-test-db"
+		scDeployName      = "sc-test-app"
+		scDatabaseName    = "app.db"
+		scDatabasePath    = "/data"
+		scVolumeName      = "sc-data"
+		scSecretRef       = "s3-creds"
+		injectTrue        = "true"    // goconst
+		appContainerImage = "busybox" // goconst
+	)
+
+	ctx := context.Background()
+
+	newInjector := func() *webhook.SidecarInjector {
+		return &webhook.SidecarInjector{
+			Client:  k8sClient,
+			Decoder: admission.NewDecoder(k8sClient.Scheme()),
+		}
+	}
+
+	newPod := func(annotations map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "sc-pod", Namespace: namespace, Annotations: annotations},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "app", Image: appContainerImage,
+					VolumeMounts: []corev1.VolumeMount{{Name: scVolumeName, MountPath: scDatabasePath}},
+				}},
+				Volumes: []corev1.Volume{{
+					Name:         scVolumeName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+			},
+		}
+	}
+
+	makeRequest := func(pod *corev1.Pod) admission.Request {
+		raw, err := json.Marshal(pod)
+		Expect(err).NotTo(HaveOccurred())
+		return admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{
+				Operation: admissionv1.Create,
+				Object:    runtime.RawExtension{Raw: raw},
+			},
+		}
+	}
+
+	newBackupDB := func(uid, gid *int64) *databasev1.LitestreamReplica {
+		db := &databasev1.LitestreamReplica{
+			ObjectMeta: metav1.ObjectMeta{Name: scDBName, Namespace: namespace},
+			Spec: databasev1.LitestreamReplicaSpec{
+				DatabaseName:     scDatabaseName,
+				DatabasePath:     scDatabasePath,
+				TargetDeployment: scDeployName,
+				RunAsUser:        uid,
+				RunAsGroup:       gid,
+				Backup: databasev1.BackupSpec{
+					Enabled: true,
+					Destination: databasev1.BackupDestination{
+						S3: &databasev1.S3Destination{
+							Bucket:    "bucket",
+							SecretRef: scSecretRef,
+						},
+					},
+				},
+			},
+		}
+		return db
+	}
+
+	AfterEach(func() {
+		db := &databasev1.LitestreamReplica{}
+		_ = k8sClient.Get(ctx, types.NamespacedName{Name: scDBName, Namespace: namespace}, db)
+		_ = k8sClient.Delete(ctx, db)
+	})
+
+	annotations := map[string]string{
+		databasev1.AnnotationInject: injectTrue,
+		databasev1.AnnotationConfig: namespace + "/" + scDBName,
+	}
+
+	It("archive-check init container has no SecurityContext when RunAsUser/RunAsGroup omitted", func() {
+		Expect(k8sClient.Create(ctx, newBackupDB(nil, nil))).To(Succeed())
+
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		Expect(archiveCheck.SecurityContext).To(BeNil())
+	})
+
+	It("archive-check init container gets SecurityContext when RunAsUser set", func() {
+		uid, gid := int64(1000), int64(2000)
+		Expect(k8sClient.Create(ctx, newBackupDB(&uid, &gid))).To(Succeed())
+
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var archiveCheck corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "litestream-archive-check" {
+				archiveCheck = c
+				break
+			}
+		}
+		Expect(archiveCheck.SecurityContext).NotTo(BeNil())
+		Expect(*archiveCheck.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+		Expect(*archiveCheck.SecurityContext.RunAsGroup).To(Equal(int64(2000)))
+	})
+
+	It("db-init init container gets SecurityContext when RunAsUser set", func() {
+		uid := int64(1000)
+		db := newBackupDB(&uid, nil)
+		db.Spec.InitSQL = "CREATE TABLE t (id INTEGER PRIMARY KEY);"
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var dbInit corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "db-init" {
+				dbInit = c
+				break
+			}
+		}
+		Expect(dbInit.SecurityContext).NotTo(BeNil())
+		Expect(*dbInit.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+		Expect(dbInit.SecurityContext.RunAsGroup).To(BeNil())
+	})
+
+	It("db-init init container has no SecurityContext when RunAsUser/RunAsGroup omitted", func() {
+		db := newBackupDB(nil, nil)
+		db.Spec.InitSQL = "CREATE TABLE t (id INTEGER PRIMARY KEY);"
+		Expect(k8sClient.Create(ctx, db)).To(Succeed())
+
+		resp := newInjector().Handle(ctx, makeRequest(newPod(annotations)))
+		Expect(resp.Allowed).To(BeTrue())
+
+		patched := applyAllPatches(newPod(annotations), resp.Patches)
+		var dbInit corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == "db-init" {
+				dbInit = c
+				break
+			}
+		}
+		Expect(dbInit.SecurityContext).To(BeNil())
+	})
+})
+
 // applyInitPatches reconstructs the mutated pod from JSON-patch add operations
 // produced by admission.PatchResponseFromRaw. The path for appended array
 // elements uses a numeric index (e.g. /spec/containers/1), so we match on

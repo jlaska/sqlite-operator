@@ -1112,6 +1112,12 @@ func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEn
 }
 
 func litestreamReplicaManifestWithOpts(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string, autoRestore bool) string {
+	return litestreamReplicaManifestFull(name, ns, target, dbFile, dbPath, backupEnabled, initSQL, autoRestore, nil)
+}
+
+// litestreamReplicaManifestFull is the full-featured constructor. runAsUser sets the UID for
+// Litestream-managed init containers (archive-check, db-init). When nil the image default is used.
+func litestreamReplicaManifestFull(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string, autoRestore bool, runAsUser *int64) string {
 	db := &databasev1.LitestreamReplica{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamReplica"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -1120,6 +1126,7 @@ func litestreamReplicaManifestWithOpts(name, ns, target, dbFile, dbPath string, 
 			DatabasePath:     dbPath,
 			TargetDeployment: target,
 			InitSQL:          initSQL,
+			RunAsUser:        runAsUser,
 		},
 	}
 	if backupEnabled {

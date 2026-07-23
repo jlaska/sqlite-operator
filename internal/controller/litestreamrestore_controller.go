@@ -368,11 +368,22 @@ func (r *LitestreamRestoreReconciler) buildValidationJob(
 		restore.Spec.TargetPath,
 	)
 
-	// Run as root so the validation container can read the restored DB file, which
-	// litestream restore writes as root. Without this, non-root images (e.g.
-	// keinos/sqlite3:latest) fail with a permission error — a false negative.
-	rootUID := int64(0)
-	rootGID := int64(0)
+	// Match the validation job's UID/GID to the restore job so it can read the
+	// restored file. When not specified, default to root to preserve existing
+	// behavior (litestream writes as root by default).
+	var validationSecCtx *corev1.PodSecurityContext
+	if restore.Spec.RunAsUser != nil || restore.Spec.RunAsGroup != nil {
+		validationSecCtx = &corev1.PodSecurityContext{
+			RunAsUser:  restore.Spec.RunAsUser,
+			RunAsGroup: restore.Spec.RunAsGroup,
+		}
+	} else {
+		rootUID, rootGID := int64(0), int64(0)
+		validationSecCtx = &corev1.PodSecurityContext{
+			RunAsUser:  &rootUID,
+			RunAsGroup: &rootGID,
+		}
+	}
 
 	backoffLimit := int32(1)
 	return &batchv1.Job{
@@ -386,11 +397,8 @@ func (r *LitestreamRestoreReconciler) buildValidationJob(
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: jobLabels},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser:  &rootUID,
-						RunAsGroup: &rootGID,
-					},
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: validationSecCtx,
 					Containers: []corev1.Container{
 						{
 							Name:    "db-integrity-check",
@@ -553,6 +561,53 @@ func (r *LitestreamRestoreReconciler) buildRestoreJob(
 		restoreLabelKey:                restore.Name,
 	}
 
+	restorePodSpec := corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyOnFailure,
+		Containers: []corev1.Container{
+			{
+				Name:  "litestream-restore",
+				Image: image,
+				Args:  args,
+				// Credentials via env vars (supported by Litestream).
+				// Endpoint is read from the mounted litestream.yml config.
+				Env: s3EnvVars(s3.SecretRef),
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: restoreTargetVolumeName, MountPath: mountPath},
+					{Name: "litestream-config", MountPath: "/etc/litestream", ReadOnly: true},
+				},
+			},
+		},
+		Volumes: []corev1.Volume{
+			{
+				Name: "target",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: restore.Spec.TargetPVC,
+					},
+				},
+			},
+			{
+				// Dedicated restore config with full S3 replica settings.
+				// The source LitestreamReplica's ConfigMap is paused (dbs: []) during
+				// restore, so we use a fresh copy named after the restore CR.
+				Name: "litestream-config",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: restore.Name + "-litestream",
+						},
+					},
+				},
+			},
+		},
+	}
+	if restore.Spec.RunAsUser != nil || restore.Spec.RunAsGroup != nil {
+		restorePodSpec.SecurityContext = &corev1.PodSecurityContext{
+			RunAsUser:  restore.Spec.RunAsUser,
+			RunAsGroup: restore.Spec.RunAsGroup,
+		}
+	}
+
 	backoffLimit := int32(3)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -564,46 +619,7 @@ func (r *LitestreamRestoreReconciler) buildRestoreJob(
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: jobLabels},
-				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyOnFailure,
-					Containers: []corev1.Container{
-						{
-							Name:  "litestream-restore",
-							Image: image,
-							Args:  args,
-							// Credentials via env vars (supported by Litestream).
-							// Endpoint is read from the mounted litestream.yml config.
-							Env: s3EnvVars(s3.SecretRef),
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: restoreTargetVolumeName, MountPath: mountPath},
-								{Name: "litestream-config", MountPath: "/etc/litestream", ReadOnly: true},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "target",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: restore.Spec.TargetPVC,
-								},
-							},
-						},
-						{
-							// Dedicated restore config with full S3 replica settings.
-							// The source LitestreamReplica's ConfigMap is paused (dbs: []) during
-							// restore, so we use a fresh copy named after the restore CR.
-							Name: "litestream-config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: restore.Name + "-litestream",
-									},
-								},
-							},
-						},
-					},
-				},
+				Spec:       restorePodSpec,
 			},
 		},
 	}
