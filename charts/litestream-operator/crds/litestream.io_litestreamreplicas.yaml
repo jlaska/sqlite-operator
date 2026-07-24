@@ -232,6 +232,20 @@ spec:
                   making updates idempotent across pod restarts.
                   Use IF NOT EXISTS guards to make individual statements safe to re-run.
                 type: string
+              runAsGroup:
+                description: |-
+                  RunAsGroup sets the GID for Litestream-managed init containers injected by the webhook.
+                  When omitted, the container image's default group is used.
+                format: int64
+                type: integer
+              runAsUser:
+                description: |-
+                  RunAsUser sets the UID for Litestream-managed init containers injected by the
+                  webhook (archive-check, auto-restore, db-init). When set, restored database files
+                  are owned by this UID, allowing non-root application containers to read them.
+                  When omitted, the container image's default user (root for litestream) is used.
+                format: int64
+                type: integer
               targetDeployment:
                 description: |-
                   TargetDeployment is the name of the existing Deployment in this namespace

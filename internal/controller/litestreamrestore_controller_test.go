@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -764,13 +765,16 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
 		Expect(err).NotTo(HaveOccurred())
 
-		// ScalingUp → Complete.
-		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
-		Expect(err).NotTo(HaveOccurred())
-
-		restore := &databasev1.LitestreamRestore{}
-		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
-		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+		// ScalingUp → Complete: retry until the background LitestreamReplica controller
+		// updates the ConfigMap to the full config (after cache propagation of the pause
+		// annotation removal). Each Reconcile is idempotent until the CM is updated.
+		Eventually(func(g Gomega) {
+			_, reconcileErr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			r := &databasev1.LitestreamRestore{}
+			g.Expect(k8sClient.Get(ctx, restoreKey, r)).To(Succeed())
+			g.Expect(r.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+		}, 10*time.Second, 100*time.Millisecond).Should(Succeed())
 
 		// Deployment should be scaled back to originalReplicas.
 		dep := &appsv1.Deployment{}
@@ -787,7 +791,9 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		driveToValidating(ctx, reconciler, dbKey, restoreKey, deployKey)
 		simulateValidationSuccess(ctx, restoreKey)
 
-		// Validating → ScalingUp → Complete.
+		// Two reconciles needed: first transitions Validating → ScalingUp (sets phase),
+		// second calls reconcileScalingUp which removes the pause annotation before the
+		// ConfigMap check (steps 1 and 2 run regardless of CM state).
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
@@ -807,7 +813,9 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		driveToValidating(ctx, reconciler, dbKey, restoreKey, deployKey)
 		simulateValidationSuccess(ctx, restoreKey)
 
-		// Validating → ScalingUp → Complete.
+		// Two reconciles needed: first transitions Validating → ScalingUp (sets phase),
+		// second calls reconcileScalingUp which sets skip-archive-check before the
+		// ConfigMap check (step 1 runs regardless of CM state).
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
@@ -941,12 +949,15 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		restore.Status.OriginalReplicas = &zeroReplicas
 		Expect(k8sClient.Status().Patch(ctx, restore, patch)).To(Succeed())
 
-		// ScalingUp with target=0 → skip scale-up, just resume and complete.
-		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
-		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+		// ScalingUp with target=0 → skip scale-up, just resume and complete. Retry until
+		// the LitestreamReplica controller updates the ConfigMap (cache propagation).
+		Eventually(func(g Gomega) {
+			_, reconcileErr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			r := &databasev1.LitestreamRestore{}
+			g.Expect(k8sClient.Get(ctx, restoreKey, r)).To(Succeed())
+			g.Expect(r.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+		}, 10*time.Second, 100*time.Millisecond).Should(Succeed())
 		_ = dbKey
 		_ = deployKey
 	})
@@ -1404,12 +1415,15 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		restore.Status.OriginalReplicas = nil
 		Expect(k8sClient.Status().Patch(ctx, restore, patch)).To(Succeed())
 
-		// ScalingUp → Complete with nil OriginalReplicas (defaults to 1).
-		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
-		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+		// ScalingUp → Complete with nil OriginalReplicas (defaults to 1). Retry until
+		// the LitestreamReplica controller updates the ConfigMap (cache propagation).
+		Eventually(func(g Gomega) {
+			_, reconcileErr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			r := &databasev1.LitestreamRestore{}
+			g.Expect(k8sClient.Get(ctx, restoreKey, r)).To(Succeed())
+			g.Expect(r.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+		}, 10*time.Second, 100*time.Millisecond).Should(Succeed())
 		_ = dbKey
 		_ = deployKey
 	})
@@ -1462,6 +1476,87 @@ var _ = Describe("LitestreamRestore State Machine", func() {
 		}, validateJob)).To(Succeed())
 		Expect(validateJob.Spec.Template.Spec.Containers[0].Image).To(Equal(customInitImage))
 		_ = deployKey
+	})
+
+	// buildRestoreJob / buildValidationJob — SecurityContext from spec.runAsUser/runAsGroup.
+	Context("SecurityContext from spec.runAsUser / spec.runAsGroup", func() {
+		var (
+			reconciler *LitestreamRestoreReconciler
+			sourceDB   *databasev1.LitestreamReplica
+			restore    *databasev1.LitestreamRestore
+		)
+
+		BeforeEach(func() {
+			reconciler = &LitestreamRestoreReconciler{Client: k8sClient}
+			sourceDB = &databasev1.LitestreamReplica{
+				Spec: databasev1.LitestreamReplicaSpec{
+					DatabaseName: "app.db",
+					DatabasePath: "/data",
+					Backup: databasev1.BackupSpec{
+						Enabled: true,
+						Destination: databasev1.BackupDestination{
+							S3: &databasev1.S3Destination{
+								Bucket:    "bucket",
+								SecretRef: "secret",
+							},
+						},
+					},
+				},
+			}
+			restore = &databasev1.LitestreamRestore{
+				ObjectMeta: metav1.ObjectMeta{Name: "sec-ctx-test", Namespace: namespaceName},
+				Spec: databasev1.LitestreamRestoreSpec{
+					SourceRef:  sourceDB.Name,
+					TargetPVC:  "test-pvc",
+					TargetPath: "/data/app.db",
+				},
+			}
+		})
+
+		It("buildRestoreJob has no SecurityContext when RunAsUser/RunAsGroup omitted", func() {
+			job := reconciler.buildRestoreJob(restore, sourceDB, "restore-job")
+			Expect(job.Spec.Template.Spec.SecurityContext).To(BeNil())
+		})
+
+		It("buildRestoreJob sets PodSecurityContext when RunAsUser is set", func() {
+			uid := int64(1000)
+			restore.Spec.RunAsUser = &uid
+			job := reconciler.buildRestoreJob(restore, sourceDB, "restore-job")
+			Expect(job.Spec.Template.Spec.SecurityContext).NotTo(BeNil())
+			Expect(job.Spec.Template.Spec.SecurityContext.RunAsUser).NotTo(BeNil())
+			Expect(*job.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(job.Spec.Template.Spec.SecurityContext.RunAsGroup).To(BeNil())
+		})
+
+		It("buildRestoreJob sets both RunAsUser and RunAsGroup when both specified", func() {
+			uid, gid := int64(1000), int64(2000)
+			restore.Spec.RunAsUser = &uid
+			restore.Spec.RunAsGroup = &gid
+			job := reconciler.buildRestoreJob(restore, sourceDB, "restore-job")
+			secCtx := job.Spec.Template.Spec.SecurityContext
+			Expect(secCtx).NotTo(BeNil())
+			Expect(*secCtx.RunAsUser).To(Equal(int64(1000)))
+			Expect(*secCtx.RunAsGroup).To(Equal(int64(2000)))
+		})
+
+		It("buildValidationJob defaults to root SecurityContext when RunAsUser/RunAsGroup omitted", func() {
+			job := reconciler.buildValidationJob(restore, sourceDB, "validate-job")
+			secCtx := job.Spec.Template.Spec.SecurityContext
+			Expect(secCtx).NotTo(BeNil())
+			Expect(*secCtx.RunAsUser).To(Equal(int64(0)))
+			Expect(*secCtx.RunAsGroup).To(Equal(int64(0)))
+		})
+
+		It("buildValidationJob uses restore's RunAsUser/RunAsGroup when set", func() {
+			uid, gid := int64(1000), int64(1000)
+			restore.Spec.RunAsUser = &uid
+			restore.Spec.RunAsGroup = &gid
+			job := reconciler.buildValidationJob(restore, sourceDB, "validate-job")
+			secCtx := job.Spec.Template.Spec.SecurityContext
+			Expect(secCtx).NotTo(BeNil())
+			Expect(*secCtx.RunAsUser).To(Equal(int64(1000)))
+			Expect(*secCtx.RunAsGroup).To(Equal(int64(1000)))
+		})
 	})
 
 	// reconcileRunning — Job still running (no conditions set yet → requeue).
@@ -1791,18 +1886,22 @@ var _ = Describe("LitestreamRestore State Machine with StatefulSet target", func
 		restore.Status.Phase = databasev1.RestorePhaseScalingUp
 		Expect(k8sClient.Status().Patch(ctx, restore, patch)).To(Succeed())
 
-		// ScalingUp → Complete (scales StatefulSet back up to 1).
-		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
-		Expect(err).NotTo(HaveOccurred())
+		// ScalingUp → Complete (scales StatefulSet back up to 1). Retry until the
+		// LitestreamReplica controller updates the ConfigMap (cache propagation).
+		Eventually(func(g Gomega) {
+			_, reconcileErr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: restoreKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			r := &databasev1.LitestreamRestore{}
+			g.Expect(k8sClient.Get(ctx, restoreKey, r)).To(Succeed())
+			g.Expect(r.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
+		}, 10*time.Second, 100*time.Millisecond).Should(Succeed())
 
 		Expect(k8sClient.Get(ctx, stsKey, sts)).To(Succeed())
 		Expect(sts.Spec.Replicas).NotTo(BeNil())
 		Expect(*sts.Spec.Replicas).To(Equal(int32(1)))
-
-		Expect(k8sClient.Get(ctx, restoreKey, restore)).To(Succeed())
-		Expect(restore.Status.Phase).To(Equal(databasev1.RestorePhaseComplete))
 	})
 })
+
 
 // simulateValidationSuccess marks the validation Job as complete (integrity check passed).
 func simulateValidationSuccess(ctx context.Context, restoreKey types.NamespacedName) {

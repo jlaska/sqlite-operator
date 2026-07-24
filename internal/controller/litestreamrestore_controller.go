@@ -368,11 +368,22 @@ func (r *LitestreamRestoreReconciler) buildValidationJob(
 		restore.Spec.TargetPath,
 	)
 
-	// Run as root so the validation container can read the restored DB file, which
-	// litestream restore writes as root. Without this, non-root images (e.g.
-	// keinos/sqlite3:latest) fail with a permission error — a false negative.
-	rootUID := int64(0)
-	rootGID := int64(0)
+	// Match the validation job's UID/GID to the restore job so it can read the
+	// restored file. When not specified, default to root to preserve existing
+	// behavior (litestream writes as root by default).
+	var validationSecCtx *corev1.PodSecurityContext
+	if restore.Spec.RunAsUser != nil || restore.Spec.RunAsGroup != nil {
+		validationSecCtx = &corev1.PodSecurityContext{
+			RunAsUser:  restore.Spec.RunAsUser,
+			RunAsGroup: restore.Spec.RunAsGroup,
+		}
+	} else {
+		rootUID, rootGID := int64(0), int64(0)
+		validationSecCtx = &corev1.PodSecurityContext{
+			RunAsUser:  &rootUID,
+			RunAsGroup: &rootGID,
+		}
+	}
 
 	backoffLimit := int32(1)
 	return &batchv1.Job{
@@ -386,11 +397,8 @@ func (r *LitestreamRestoreReconciler) buildValidationJob(
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: jobLabels},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser:  &rootUID,
-						RunAsGroup: &rootGID,
-					},
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: validationSecCtx,
 					Containers: []corev1.Container{
 						{
 							Name:    "db-integrity-check",
@@ -417,11 +425,52 @@ func (r *LitestreamRestoreReconciler) buildValidationJob(
 	}
 }
 
-// reconcileScalingUp scales the workload back to its original replica count,
-// removes the pause annotation, and transitions to Complete.
+// reconcileScalingUp resumes replication, waits for the ConfigMap to reflect the
+// full config, then scales the workload back up and transitions to Complete.
+//
+// Operation order matters here:
+//  1. Set skip-archive-check so the webhook omits the archive-check init container
+//     for any new pods (annotation must be visible before pod admission).
+//  2. Remove the pause annotation so the LitestreamReplica controller restores the
+//     ConfigMap from "dbs: []" to the full replica config.
+//  3. Wait for the ConfigMap to reflect the full config — mirrors the symmetry with
+//     reconcilePausing, which waits for the ConfigMap to reflect the pause before
+//     scaling down. Without this gate the litestream sidecar starts with an empty
+//     config, crashes immediately, and the pod never reaches Running.
+//  4. Scale the workload back up.
 func (r *LitestreamRestoreReconciler) reconcileScalingUp(ctx context.Context, restore *databasev1.LitestreamRestore, sourceDB *databasev1.LitestreamReplica) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// Step 1: set skip-archive-check before any pod is admitted. The mutating webhook
+	// fires synchronously during pod admission and reads the LitestreamReplica via an
+	// uncached reader, so the annotation must be persisted before the workload scales up.
+	if err := r.setSkipArchiveCheck(ctx, sourceDB, true); err != nil {
+		return ctrl.Result{}, fmt.Errorf("setting skip-archive-check on LitestreamReplica: %w", err)
+	}
+
+	// Step 2: remove the pause annotation. This triggers the LitestreamReplica controller
+	// to reconcile and restore the ConfigMap from "dbs: []" to the full replica config.
+	if err := r.resumeReplication(ctx, sourceDB); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing pause annotation from LitestreamReplica: %w", err)
+	}
+
+	// Step 3: wait for the ConfigMap to reflect the full (unpaused) config before
+	// scaling up. The litestream sidecar reads the ConfigMap at startup; if it still
+	// contains "dbs: []" the container exits immediately and the pod crash-loops.
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: sourceDB.Namespace,
+		Name:      sourceDB.Name + "-litestream",
+	}, cm); err != nil {
+		return ctrl.Result{RequeueAfter: restoreRequeueInterval},
+			fmt.Errorf("getting litestream ConfigMap: %w", err)
+	}
+	if cm.Data[litestreamConfigKey] == pausedConfig {
+		log.Info("Waiting for ConfigMap to reflect unpaused state before scaling up")
+		return ctrl.Result{RequeueAfter: restoreRequeueInterval}, nil
+	}
+
+	// Step 4: scale the workload back up now that the ConfigMap is ready.
 	target := int32(1)
 	if restore.Status.OriginalReplicas != nil {
 		target = *restore.Status.OriginalReplicas
@@ -429,28 +478,13 @@ func (r *LitestreamRestoreReconciler) reconcileScalingUp(ctx context.Context, re
 	if target > 0 {
 		wt, err := r.getTargetWorkloadForRestore(ctx, sourceDB)
 		if err != nil && !errors.IsNotFound(err) {
-			log.Error(err, "Cannot find target workload during scale-up; removing pause anyway")
+			log.Error(err, "Cannot find target workload during scale-up")
 		} else if err == nil {
 			if scaleErr := r.scaleWorkload(ctx, wt, target); scaleErr != nil {
 				return ctrl.Result{}, fmt.Errorf("scaling workload back to %d: %w", target, scaleErr)
 			}
 			log.Info("Scaled workload back up", "replicas", target)
 		}
-	}
-
-	// Set skip-archive-check before removing the pause annotation so that when new pods
-	// start, archive-check does not false-positive on the restored DB. The restored database
-	// file exists on the PVC, but the litestream state directory (.<dbname>-litestream/)
-	// does not — it is only created by litestream replicate on first run. Without this flag,
-	// the enhanced archive-check (which now gates on the state dir) would probe S3, find
-	// backup data, and block pod startup. The LitestreamReplica controller clears this
-	// annotation automatically once the sidecar is confirmed healthy.
-	if err := r.setSkipArchiveCheck(ctx, sourceDB, true); err != nil {
-		return ctrl.Result{}, fmt.Errorf("setting skip-archive-check on LitestreamReplica: %w", err)
-	}
-
-	if err := r.resumeReplication(ctx, sourceDB); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing pause annotation from LitestreamReplica: %w", err)
 	}
 
 	r.Recorder.Event(restore, corev1.EventTypeNormal, "RestoreComplete",
@@ -593,6 +627,53 @@ func (r *LitestreamRestoreReconciler) buildRestoreJob(
 		restoreLabelKey:                restore.Name,
 	}
 
+	restorePodSpec := corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyOnFailure,
+		Containers: []corev1.Container{
+			{
+				Name:  "litestream-restore",
+				Image: image,
+				Args:  args,
+				// Credentials via env vars (supported by Litestream).
+				// Endpoint is read from the mounted litestream.yml config.
+				Env: s3EnvVars(s3.SecretRef),
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: restoreTargetVolumeName, MountPath: mountPath},
+					{Name: "litestream-config", MountPath: "/etc/litestream", ReadOnly: true},
+				},
+			},
+		},
+		Volumes: []corev1.Volume{
+			{
+				Name: "target",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: restore.Spec.TargetPVC,
+					},
+				},
+			},
+			{
+				// Dedicated restore config with full S3 replica settings.
+				// The source LitestreamReplica's ConfigMap is paused (dbs: []) during
+				// restore, so we use a fresh copy named after the restore CR.
+				Name: "litestream-config",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: restore.Name + "-litestream",
+						},
+					},
+				},
+			},
+		},
+	}
+	if restore.Spec.RunAsUser != nil || restore.Spec.RunAsGroup != nil {
+		restorePodSpec.SecurityContext = &corev1.PodSecurityContext{
+			RunAsUser:  restore.Spec.RunAsUser,
+			RunAsGroup: restore.Spec.RunAsGroup,
+		}
+	}
+
 	backoffLimit := int32(3)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -604,46 +685,7 @@ func (r *LitestreamRestoreReconciler) buildRestoreJob(
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: jobLabels},
-				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyOnFailure,
-					Containers: []corev1.Container{
-						{
-							Name:  "litestream-restore",
-							Image: image,
-							Args:  args,
-							// Credentials via env vars (supported by Litestream).
-							// Endpoint is read from the mounted litestream.yml config.
-							Env: s3EnvVars(s3.SecretRef),
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: restoreTargetVolumeName, MountPath: mountPath},
-								{Name: "litestream-config", MountPath: "/etc/litestream", ReadOnly: true},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "target",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: restore.Spec.TargetPVC,
-								},
-							},
-						},
-						{
-							// Dedicated restore config with full S3 replica settings.
-							// The source LitestreamReplica's ConfigMap is paused (dbs: []) during
-							// restore, so we use a fresh copy named after the restore CR.
-							Name: "litestream-config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: restore.Name + "-litestream",
-									},
-								},
-							},
-						},
-					},
-				},
+				Spec:       restorePodSpec,
 			},
 		},
 	}
