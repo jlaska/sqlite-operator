@@ -600,11 +600,15 @@ var _ = Describe("Archive Check — Fresh DB Divergence", Ordered, func() {
 		DeferCleanup(func() { dumpReplicationDiagnostics(appName, dbName, dbFile) })
 
 		By("creating PVC, Deployment, and LitestreamReplica CR with backup enabled and initSQL")
+		// runAsUser: 0 — db-init runs as root so it can read the restored DB file,
+		// which litestream restore writes as root. This demonstrates that issue #110
+		// is fixed: callers now control the UID instead of the operator hardcoding root.
+		rootUID := int64(0)
 		applyLiteral(pvcManifest(pvcName, testNamespace))
 		applyLiteral(appDeploymentManifest(appName, testNamespace, pvcName, dbPath))
 		kubectl("wait", "-n", testNamespace, "deployment/"+appName,
 			"--for=condition=Available", "--timeout=3m")
-		applyLiteral(litestreamReplicaManifest(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL))
+		applyLiteral(litestreamReplicaManifestFull(dbName, testNamespace, appName, dbFile, dbPath, true, initSQL, false, &rootUID))
 
 		By("waiting for sidecar injection and BackupHealthy=True")
 		Eventually(func(g Gomega) {
@@ -1292,6 +1296,12 @@ func litestreamReplicaManifest(name, ns, target, dbFile, dbPath string, backupEn
 }
 
 func litestreamReplicaManifestWithOpts(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string, autoRestore bool) string {
+	return litestreamReplicaManifestFull(name, ns, target, dbFile, dbPath, backupEnabled, initSQL, autoRestore, nil)
+}
+
+// litestreamReplicaManifestFull is the full-featured constructor. runAsUser sets the UID for
+// Litestream-managed init containers (archive-check, db-init). When nil the image default is used.
+func litestreamReplicaManifestFull(name, ns, target, dbFile, dbPath string, backupEnabled bool, initSQL string, autoRestore bool, runAsUser *int64) string {
 	db := &databasev1.LitestreamReplica{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "litestream.io/v1", Kind: "LitestreamReplica"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -1300,6 +1310,7 @@ func litestreamReplicaManifestWithOpts(name, ns, target, dbFile, dbPath string, 
 			DatabasePath:     dbPath,
 			TargetDeployment: target,
 			InitSQL:          initSQL,
+			RunAsUser:        runAsUser,
 		},
 	}
 	if backupEnabled {

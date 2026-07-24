@@ -246,7 +246,7 @@ func main() {
 
 		mgr.GetWebhookServer().Register("/mutate-core-v1-pod", &webhook.Admission{
 			Handler: &litestreamwebhook.SidecarInjector{
-				Client:  mgr.GetClient(),
+				Client:  mgr.GetAPIReader(),
 				Decoder: admission.NewDecoder(mgr.GetScheme()),
 			},
 		})

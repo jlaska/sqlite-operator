@@ -62,7 +62,12 @@ const dbInitSQLVolume = "db-init-sql"
 // It is registered as a raw admission.Handler (not a typed CRD webhook) because
 // it operates on core/v1 Pod resources.
 type SidecarInjector struct {
-	Client  client.Client
+	// Client is an uncached API reader (mgr.GetAPIReader()) so the webhook always
+	// fetches a fresh LitestreamReplica, bypassing the informer cache. This
+	// prevents a race where skip-archive-check is set by the restore controller
+	// but the webhook reads a stale cached version and injects the archive-check
+	// init container anyway.
+	Client  client.Reader
 	Decoder admission.Decoder
 }
 
@@ -254,8 +259,8 @@ const autoRestoreContainerName = "litestream-restore"
 // buildLitestreamInitContainer builds the shared container structure for both
 // the archive-check and auto-restore init containers. Both containers use the
 // same image, env vars, and volume mounts; only the name and script differ.
-func buildLitestreamInitContainer(name, script, image, dbPath, dataVolumeName string, envVars []corev1.EnvVar) corev1.Container {
-	return corev1.Container{
+func buildLitestreamInitContainer(name, script, image, dbPath, dataVolumeName string, envVars []corev1.EnvVar, runAsUser, runAsGroup *int64) corev1.Container {
+	c := corev1.Container{
 		Name:    name,
 		Image:   image,
 		Command: []string{"sh", "-c", script},
@@ -265,6 +270,13 @@ func buildLitestreamInitContainer(name, script, image, dbPath, dataVolumeName st
 			{Name: litestreamConfigVolume, MountPath: litestreamConfigMount, ReadOnly: true},
 		},
 	}
+	if runAsUser != nil || runAsGroup != nil {
+		c.SecurityContext = &corev1.SecurityContext{
+			RunAsUser:  runAsUser,
+			RunAsGroup: runAsGroup,
+		}
+	}
+	return c
 }
 
 // injectArchiveCheckContainer injects an init container that guards against two data-loss
@@ -365,7 +377,7 @@ exit 0
 		envVars = s3CredsEnvVars(db.Spec.Backup.Destination.S3.SecretRef)
 	}
 
-	c := buildLitestreamInitContainer(archiveCheckContainerName, script, image, db.Spec.DatabasePath, dataVolumeName, envVars)
+	c := buildLitestreamInitContainer(archiveCheckContainerName, script, image, db.Spec.DatabasePath, dataVolumeName, envVars, db.Spec.RunAsUser, db.Spec.RunAsGroup)
 	pod.Spec.InitContainers = append([]corev1.Container{c}, pod.Spec.InitContainers...)
 }
 
@@ -427,7 +439,7 @@ exit 0
 		envVars = s3CredsEnvVars(db.Spec.Backup.Destination.S3.SecretRef)
 	}
 
-	c := buildLitestreamInitContainer(autoRestoreContainerName, script, image, db.Spec.DatabasePath, dataVolumeName, envVars)
+	c := buildLitestreamInitContainer(autoRestoreContainerName, script, image, db.Spec.DatabasePath, dataVolumeName, envVars, db.Spec.RunAsUser, db.Spec.RunAsGroup)
 	pod.Spec.InitContainers = append([]corev1.Container{c}, pod.Spec.InitContainers...)
 }
 
@@ -499,6 +511,12 @@ fi
 				ReadOnly:  true,
 			},
 		},
+	}
+	if db.Spec.RunAsUser != nil || db.Spec.RunAsGroup != nil {
+		initContainer.SecurityContext = &corev1.SecurityContext{
+			RunAsUser:  db.Spec.RunAsUser,
+			RunAsGroup: db.Spec.RunAsGroup,
+		}
 	}
 
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
